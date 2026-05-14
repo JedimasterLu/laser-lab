@@ -7,9 +7,6 @@ class SC30Shutter:
 
         Args:
             port (str): The port name.
-            wait_time (float, optional): The maximum time to wait for
-                the shutter to reach the target state in seconds.
-                Defaults to 10 ms.
         """
         self.ser = serial.Serial(port, baudrate=115200, timeout=1)
         self.set_mode('manual')
@@ -39,7 +36,7 @@ class SC30Shutter:
             command = f"triggerstate{channel}?\r"
         self.ser.write(command.encode())
         response = self.ser.read_until(b">").decode().strip()
-        if not "0" in response:
+        if "0" not in response:
             return True
         return False
     
@@ -60,20 +57,21 @@ class SC30Shutter:
         if mode not in ['manual', 'internal']:
             raise ValueError("Only 'manual' and 'internal' are supported")
         if mode == 'manual':
-            self.ser.write(f"mode=0\r".encode())
+            self.ser.write("mode=0\r".encode())
             self.ser.read_until(b">").decode().strip()
         elif mode == 'internal':
-            self.ser.write(f"mode=2\r".encode())
+            self.ser.write("mode=2\r".encode())
             self.ser.read_until(b">").decode().strip()
         self.unlock()
 
     def mode(self) -> Literal['manual', 'internal']:
-        self.ser.write(f"mode?\r".encode())
+        self.ser.write("mode?\r".encode())
         response = self.ser.read_until(b">").decode().strip()
         if "0" in response:
             return 'manual'
         elif "2" in response:
             return 'internal'
+        raise ValueError("Unknown mode")
 
     def set_freq(self, freq: float, channel: int = 1):
         if freq > 50 or freq < 0.1:

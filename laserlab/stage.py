@@ -1,5 +1,6 @@
 import serial
 import time
+import numpy as np
 
 class ProScanStage:
     def __init__(self, port: str, wait_time: float = 1e-2):
@@ -70,15 +71,17 @@ class ProScanStage:
         x, y, _ = response.split(',')
         return float(x), float(y)
 
-    def move_to(self, x: int, y: int):
+    def move_to(self, x: float, y: float):
         """Move the stage to the specified (x, y) position."""
+        x, y = int(x), int(y)
         command = f"G {x},{y}\r".encode()
         self.ser.write(command)
         response = self.ser.read_until(b"\r").decode().strip()
         if response != "R":
             raise RuntimeWarning("Stage is not correctly moving!")
 
-    def move_by(self, dx: int, dy: int):
+    def move_by(self, dx: float, dy: float):
+        dx, dy = int(dx), int(dy)
         command = f"GR {dx},{dy}\r".encode()
         self.ser.write(command)
         response = self.ser.read_until(b"\r").decode().strip()
@@ -87,7 +90,7 @@ class ProScanStage:
 
     def scan(
             self,
-            positions: list[tuple[int, int]],
+            positions: list[tuple[float, float]] | np.ndarray,
             intervals: list[float] | float = 0):
         for i, pos in enumerate(positions):
             self.move_to(*pos)
