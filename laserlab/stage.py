@@ -94,6 +94,7 @@ class ProScanStage:
             intervals: list[float] | float = 0):
         for i, pos in enumerate(positions):
             self.move_to(*pos)
+            self.wait()
             if isinstance(intervals, list) and i < len(intervals):
                 time.sleep(intervals[i])
             elif isinstance(intervals, (int, float)):
