@@ -68,7 +68,6 @@ def find_self_intersections(vertices: np.ndarray) -> list[tuple[float, float]]:
             unique.append((x, y))
     return unique
 
-
 def generate_serpentine_path(
     polygon: Polygon,
     y_step: float,
@@ -124,6 +123,25 @@ def generate_serpentine_path(
 
     return np.array(path)
 
+def generate_rectangle_path(bounds: tuple, y_step: float, x_step: float) -> np.ndarray:
+    """Generate serpentine points for a rectangle using pure NumPy math, bypassing geometry checks."""
+    
+    min_x, min_y, max_x, max_y = bounds
+    
+    # Pre-calculate all possible Y and X coordinates
+    y_values = np.arange(min_y, max_y + y_step, y_step)
+    x_forward = np.arange(min_x, max_x + x_step, x_step)
+    x_backward = x_forward[::-1] # Flips the array for the serpentine return trip
+    
+    path = []
+    for i, y in enumerate(y_values):
+        # Even rows scan left-to-right, odd rows scan right-to-left
+        x_row = x_forward if i % 2 == 0 else x_backward
+        
+        for x in x_row:
+            path.append((float(x), float(y)))
+            
+    return np.array(path)
 
 def main():
     print("=" * 40)
@@ -201,7 +219,12 @@ def main():
     # Generate serpentine scan path in stage-step coordinates.
     y_step = max(1.0, 50.0 * stage.steps_per_micron)  # 50 um line spacing
     x_step = max(1.0, 25.0 * stage.steps_per_micron)  # 25 um point spacing
-    scan_points = generate_serpentine_path(polygon, y_step=y_step, x_step=x_step)
+    
+    if choice == "1":
+        scan_points = generate_rectangle_path(polygon.bounds, y_step=y_step, x_step=x_step)
+    else:   
+        scan_points = generate_serpentine_path(polygon, y_step=y_step, x_step=x_step)
+    
     print(f"Generated {len(scan_points)} scan points.")
 
     vertices_mm = vertices / (1000 * stage.steps_per_micron)
