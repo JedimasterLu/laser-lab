@@ -3,6 +3,27 @@ import matplotlib.pyplot as plt
 import laserlab
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, Polygon
 
+def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
+    """
+    Generate the 4 vertices of a rectangle given two opposite diagonal corners.
+    Returns the vertices in a sequential order to form a valid polygon.
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    
+    # Calculate the bounding box coordinates
+    min_x, max_x = min(x1, x2), max(x1, x2)
+    min_y, max_y = min(y1, y2), max(y1, y2)
+    
+    # Define the 4 corners in order (e.g., bottom-left, bottom-right, top-right, top-left)
+    vertices = [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y)
+    ]
+    
+    return np.array(vertices)
 
 def find_self_intersections(vertices: np.ndarray) -> list[tuple[float, float]]:
     """Return all non-adjacent edge intersection points of a polygon."""
