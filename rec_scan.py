@@ -223,8 +223,8 @@ def main():
     plt.show()
     plt.close(fig)
 
-    input("Save scan points to 'scan_points.csv'? (y/n): ")
-    if input().lower() == 'y':
+    save_choice = input("Save scan points to 'scan_points.csv'? (y/n): ")
+    if save_choice.lower() == 'y':
         np.savetxt("scan_points.csv", scan_points, delimiter=",", header="x_steps,y_steps", comments="")
         print("Scan points saved to 'scan_points.csv'.")
     else:
