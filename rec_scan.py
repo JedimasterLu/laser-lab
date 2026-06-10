@@ -15,6 +15,10 @@ def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]
     min_x, max_x = min(x1, x2), max(x1, x2)
     min_y, max_y = min(y1, y2), max(y1, y2)
     
+    area = (max_x - min_x) * (max_y - min_y)
+    if area <= 0:
+        raise ValueError("The provided points do not form a valid rectangle (zero area).")
+    
     # Define the 4 corners in order (e.g., bottom-left, bottom-right, top-right, top-left)
     vertices = [
         (min_x, min_y),
@@ -129,40 +133,71 @@ def main():
     shutter = laserlab.SC30Shutter(port="COM6")
     shutter.set_mode('manual')
     shutter.close()
-    print("=" * 40)
-    print("Please define the vertices of a polygon:")
-    print("Enter 'a' to add a vertex, 'q' to finish.")
-    print("Please use the joystick to move to the desired" \
-        "position before pressing 'a'.")
     
-    # Collect vertices from user input
-    vertices = []
-    new_input = ""
-    while new_input != "q":
-        new_input = input("Enter command: ")
-        if new_input == "a":
-            vertices.append(stage.position)
-            print(f"Vertex added: {stage.position}, total vertices: {len(vertices)}")
-        elif new_input == "q":
-            print("Finished defining polygon.")
-        else:
-            print("Invalid command. Please enter 'a' or 'q'.")
-    vertices = np.array(vertices)
-    if len(vertices) < 3:
-        raise ValueError("At least 3 vertices are required to define a polygon.")
+    print("=" * 40)
+    print("Select the type of region to pattern:")
+    print(" 1: Rectangle defined by two diagonal corners")
+    print(" 2: Freeform polygon defined by vertices")
+    
+    choice = ""
+    while choice not in ["1", "2"]: 
+        choice = input("Enter your choice (1 or 2): ")
+        if choice not in ["1", "2"]:
+            print("Invalid choice. Please enter '1' or '2'.")
+    
+    if choice == "1":
+        print("\n--- Rectangle Mode ---")
+        print("Use the joystick to move to the first corner, then press 'a'.")
+        print("Move to the opposite diagonal corner and press 'a' again.")
+        
+        diagonal_points = []
+        while len(diagonal_points) < 2:
+            new_input = input("Enter command ('a' to add point): ").strip().lower()
+            if new_input == "a":
+                diagonal_points.append(stage.position)
+                print(f"Corner {len(diagonal_points)} added: {stage.position}")
+            else:
+                print("Invalid command. Please enter 'a'.")
+        try:
+            vertices = generate_rectangle_vertices(diagonal_points[0], diagonal_points[1])
+            print("Rectangle generated successfully.")
+        except ValueError as e:
+            print(f"Error: {e}")
+            return # Safely exit if the area is zero
+    
+    elif choice == "2":
+        print("\n--- Custom Polygon Mode ---")
+        print("Enter 'a' to add a vertex, 'q' to finish.")
+        print("Please use the joystick to move to the desired position before pressing 'a'.")
+        
+        # Collect vertices from user input
+        vertices = []
+        new_input = ""
+        while new_input != "q":
+            new_input = input("Enter command: ")
+            if new_input == "a":
+                vertices.append(stage.position)
+                print(f"Vertex added: {stage.position}, total vertices: {len(vertices)}")
+            elif new_input == "q":
+                print("Finished defining polygon.")
+            else:
+                print("Invalid command. Please enter 'a' or 'q'.")
+        vertices = np.array(vertices)
+        if len(vertices) < 3:
+            raise ValueError("At least 3 vertices are required to define a polygon.")
 
-    # Validate polygon has no edge intersections and encloses a single region.
-    intersections = find_self_intersections(vertices)
-    if intersections:
-        print("Detected invalid polygon (self-intersections found):")
-        for i, (x, y) in enumerate(intersections, start=1):
-            print(f"  {i}. intersection near stage steps ({x:.2f}, {y:.2f})")
-        raise ValueError("Polygon edges intersect. Please redefine a simple polygon.")
+        # Validate polygon has no edge intersections and encloses a single region.
+        intersections = find_self_intersections(vertices)
+        if intersections:
+            print("Detected invalid polygon (self-intersections found):")
+            for i, (x, y) in enumerate(intersections, start=1):
+                print(f"  {i}. intersection near stage steps ({x:.2f}, {y:.2f})")
+            raise ValueError("Polygon edges intersect. Please redefine a simple polygon.")
 
     polygon = Polygon(vertices)
     if (not polygon.is_valid) or polygon.area <= 0:
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
-
+    
     # Generate serpentine scan path in stage-step coordinates.
     y_step = max(1.0, 50.0 * stage.steps_per_micron)  # 50 um line spacing
     x_step = max(1.0, 25.0 * stage.steps_per_micron)  # 25 um point spacing
