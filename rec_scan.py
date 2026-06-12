@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import laserlab
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, Polygon
+from laserlab import stage
 
 def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
     """
@@ -123,25 +124,21 @@ def generate_serpentine_path(
 
     return np.array(path)
 
-def generate_rectangle_path(bounds: tuple, y_step: float, x_step: float) -> np.ndarray:
-    """Generate serpentine points for a rectangle using pure NumPy math, bypassing geometry checks."""
-    
+def generate_rectangle_serpentine_path_smooth(bounds: tuple, y_step: float) -> np.ndarray:
+    """Generate smooth serpentine points using only row endpoints."""
     min_x, min_y, max_x, max_y = bounds
     
-    # Pre-calculate all possible Y and X coordinates
+    # Generate the Y 'rungs' normally
     y_values = np.arange(min_y, max_y + y_step, y_step)
-    x_forward = np.arange(min_x, max_x + x_step, x_step)
-    x_backward = x_forward[::-1] # Flips the array for the serpentine return trip
     
-    path = []
-    for i, y in enumerate(y_values):
-        # Even rows scan left-to-right, odd rows scan right-to-left
-        x_row = x_forward if i % 2 == 0 else x_backward
-        
-        for x in x_row:
-            path.append((float(x), float(y)))
-            
-    return np.array(path)
+    # Only use the absolute start and end of the X bounds
+    x_values = np.array([min_x, max_x])
+    
+    # Create the grids and flip the odd rows
+    X, Y = np.meshgrid(x_values, y_values)
+    X[1::2, :] = X[1::2, ::-1]
+    
+    return np.column_stack((X.ravel(), Y.ravel()))
 
 def main():
     print("=" * 40)
@@ -157,13 +154,13 @@ def main():
     print(" 1: Rectangle defined by two diagonal corners")
     print(" 2: Freeform polygon defined by vertices")
     
-    choice = ""
-    while choice not in ["1", "2"]: 
-        choice = input("Enter your choice (1 or 2): ")
-        if choice not in ["1", "2"]:
+    choice_shape = ""
+    while choice_shape not in ["1", "2"]: 
+        choice_shape = input("Enter your choice (1 or 2): ")
+        if choice_shape not in ["1", "2"]:
             print("Invalid choice. Please enter '1' or '2'.")
     
-    if choice == "1":
+    if choice_shape == "1":
         print("\n--- Rectangle Mode ---")
         print("Use the joystick to move to the first corner, then press 'a'.")
         print("Move to the opposite diagonal corner and press 'a' again.")
@@ -182,8 +179,8 @@ def main():
         except ValueError as e:
             print(f"Error: {e}")
             return # Safely exit if the area is zero
-    
-    elif choice == "2":
+            
+    elif choice_shape == "2":
         print("\n--- Custom Polygon Mode ---")
         print("Enter 'a' to add a vertex, 'q' to finish.")
         print("Please use the joystick to move to the desired position before pressing 'a'.")
@@ -216,13 +213,39 @@ def main():
     if (not polygon.is_valid) or polygon.area <= 0:
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
     
-    # Generate serpentine scan path in stage-step coordinates.
-    y_step = max(1.0, 50.0 * stage.steps_per_micron)  # 50 um line spacing
-    x_step = max(1.0, 25.0 * stage.steps_per_micron)  # 25 um point spacing
-    
-    if choice == "-1":
-        scan_points = generate_rectangle_path(polygon.bounds, y_step=y_step, x_step=x_step)
-    else:   
+    # Path generation logic based on shape selection
+    if choice_shape == "1":
+        print("\nSelect the serpentine path generation method:")
+        print(" 1: Fast rectangle method (smooth endpoints only)")
+        print(" 2: General polygon method (works for any shape)")
+        
+        choice_path = ""
+        while choice_path not in ["1", "2"]: 
+            choice_path = input("Enter your choice (1 or 2): ")
+            if choice_path not in ["1", "2"]:
+                print("Invalid choice. Please enter '1' or '2'.")
+                
+        if choice_path == "1":
+            y_step_um = float(input("Enter the desired Y step size (um): "))
+            y_step = y_step_um * stage.steps_per_micron
+            scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, y_step=y_step)
+        else:
+            # Fallback to general method for rectangle if they chose '2'
+            print("Enter 0 for the x_step_um to make smooth path.")
+            x_step_um = float(input("Enter the desired X step size (um): "))
+            y_step_um = float(input("Enter the desired Y step size (um): "))
+            x_step = x_step_um * stage.steps_per_micron
+            y_step = y_step_um * stage.steps_per_micron
+            scan_points = generate_serpentine_path(polygon, y_step=y_step, x_step=x_step)
+            
+    else:
+        # Freeform polygons MUST use the general shapely method
+        print("\nUsing general polygon path generation for custom shape.")
+        print("Enter 0 for the x_step_um to make smooth path.")
+        x_step_um = float(input("Enter the desired X step size (um): "))
+        y_step_um = float(input("Enter the desired Y step size (um): "))
+        x_step = x_step_um * stage.steps_per_micron
+        y_step = y_step_um * stage.steps_per_micron
         scan_points = generate_serpentine_path(polygon, y_step=y_step, x_step=x_step)
     
     print(f"Generated {len(scan_points)} scan points.")
@@ -265,14 +288,19 @@ def main():
 
     # Begin scan execution
     input("Press Enter to start the scan...")
-    stage.move_to(*scan_points[0])
-    shutter.open()
-    stage.scan(scan_points, interval_ms)  # Adjust speed as needed
-    shutter.close()
+    try:
+        stage.move_to(*scan_points[0])
+        shutter.open()
+        stage.scan(scan_points, interval_ms)  # Adjust speed as needed
+    finally:
+        shutter.close()
+        print("Shutter safely closed.")
+        
     print("Scan completed.")
 
     print('Serpentine scan finished. You may now safely exit the program.')
     print("=" * 40)
+    
 
 if __name__ == "__main__":
     main()
