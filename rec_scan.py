@@ -220,7 +220,7 @@ def main():
     y_step = max(1.0, 50.0 * stage.steps_per_micron)  # 50 um line spacing
     x_step = max(1.0, 25.0 * stage.steps_per_micron)  # 25 um point spacing
     
-    if choice == "1":
+    if choice == "-1":
         scan_points = generate_rectangle_path(polygon.bounds, y_step=y_step, x_step=x_step)
     else:   
         scan_points = generate_serpentine_path(polygon, y_step=y_step, x_step=x_step)
