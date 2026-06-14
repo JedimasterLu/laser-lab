@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import laserlab
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, Point, Polygon
-from laserlab import stage
 
 def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
     """
@@ -159,7 +158,7 @@ def main():
         choice_shape = input("Enter your choice (1 or 2): ")
         if choice_shape not in ["1", "2"]:
             print("Invalid choice. Please enter '1' or '2'.")
-    
+    vertices = []
     if choice_shape == "1":
         print("\n--- Rectangle Mode ---")
         print("Use the joystick to move to the first corner, then press 'a'.")
@@ -249,7 +248,8 @@ def main():
         scan_points = generate_serpentine_path(polygon, y_step=y_step, x_step=x_step)
     
     print(f"Generated {len(scan_points)} scan points.")
-
+    if not isinstance(vertices, np.ndarray):
+        vertices = np.array(vertices)
     vertices_mm = vertices / (1000 * stage.steps_per_micron)
     scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
 
