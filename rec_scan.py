@@ -212,6 +212,8 @@ def main():
     if (not polygon.is_valid) or polygon.area <= 0:
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
     
+    # AFTER POLYGON IS DEFINED, IMAGE PROCESSING IS IMPLEMENTED. 
+    
     # Path generation logic based on shape selection
     if choice_shape == "1":
         print("\nSelect the serpentine path generation method:")
