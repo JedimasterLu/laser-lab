@@ -214,6 +214,7 @@ def main():
     
     # AFTER POLYGON IS DEFINED, IMAGE PROCESSING IS IMPLEMENTED. 
     
+    # Path generation is dependent on the processed image and its output arrays AND shape selection. 
     # Path generation logic based on shape selection
     if choice_shape == "1":
         print("\nSelect the serpentine path generation method:")
