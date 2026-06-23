@@ -1,4 +1,5 @@
 # This is a pipeline that allows us to see CB particles and categorize them into CB with bubbles and CB without bubbles. 
+# The following is a test using a single image. Can be extended to a video stream or a folder of images.
 
 import cv2
 import numpy as np
