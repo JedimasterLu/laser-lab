@@ -113,7 +113,34 @@ def main():
     print(f"Generated {len(scan_points)} scan points.")
     
     # ---------------------------------------------------------
-    # 3. VISUALIZATION & HARDWARE EXECUTION
+    # 3. SPEED CONTROL (Velocity mapping)
+    # ---------------------------------------------------------
+    print("\n--- Speed Control ---")
+    sweep_time_str = input("Enter the time (in seconds) it should take to sweep one horizontal line: ")
+    try:
+        sweep_time = float(sweep_time_str)
+        if sweep_time <= 0:
+            raise ValueError("Sweep time must be greater than 0.")
+        
+        # Calculate physical width in microns using the polygon bounds
+        min_x, _, max_x, _ = polygon.bounds
+        width_steps = max_x - min_x
+        width_um = width_steps / stage.steps_per_micron
+        
+        # Calculate required velocity (microns / second)
+        velocity_um_s = width_um / sweep_time
+        print(f"Calculated line width: {width_um:.2f} um")
+        print(f"Setting stage velocity to {velocity_um_s:.2f} um/s to achieve a {sweep_time}s sweep.")
+        
+        # Command the hardware
+        stage.set_velocity(velocity_um_s)
+        
+    except ValueError as e:
+        print(f"Invalid time: {e}")
+        return
+    
+    # ---------------------------------------------------------
+    # 4. VISUALIZATION & HARDWARE EXECUTION
     # ---------------------------------------------------------
     vertices_mm = vertices / (1000 * stage.steps_per_micron)
     scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
