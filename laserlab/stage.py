@@ -82,8 +82,12 @@ class ProScanStage:
         command = f"G {x},{y}\r".encode()
         self.ser.write(command)
         response = self.ser.read_until(b"\r").decode().strip()
-        if response != "R":
-            raise RuntimeWarning("Stage is not correctly moving!")
+        # if response != "R":
+        #     raise RuntimeWarning("Stage is not correctly moving!")
+        for _ in range(1000):
+            if response != "R":
+                time.sleep(1e-2)
+                response = self.ser.read_until(b"\r").decode().strip()
 
     def move_by(self, dx: float, dy: float):
         dx, dy = int(dx), int(dy)
@@ -119,4 +123,13 @@ class ProScanStage:
         self._velocity = velocity
 
     def close(self):
+        if not self.ser.is_open:
+            return
+        message = "I\r".encode()
+        self.ser.write(message)
+        time.sleep(0.1)
         self.ser.close()
+
+    def __del__(self):
+        if self.ser.is_open:
+            self.close()

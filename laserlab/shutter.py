@@ -78,3 +78,6 @@ class SC30Shutter:
             raise ValueError("Frequency must be between [0.1, 50.0]")
         self.ser.write(f"intfreq{channel}={freq}\r".encode())
         self.ser.read_until(b">").decode().strip()
+
+    def __del__(self):
+        self.ser.close()

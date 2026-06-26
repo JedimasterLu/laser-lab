@@ -10,15 +10,13 @@ def main():
     print("=" * 40)
     print("Initiating line scan ...")
     stage = laserlab.ProScanStage(port="COM3")
-    stage.position
-    shutter = laserlab.SC30Shutter(port="COM6")
-    shutter.set_mode('manual')
-    shutter.close()
+    stage.set_velocity(100)
     print("=" * 40)
     print("Please define the line endpoints:")
     print("Enter 'a' to add a point.")
-    print("Please use the joystick to move to the desired" \
+    print("Please use the joystick to move to the desired " \
         "position before pressing 'a'.")
+    print("")
 
     points = []
     new_input = ""
@@ -29,27 +27,44 @@ def main():
             print(f"Position added: {stage.position}, total points: {len(points)}")
         else:
             print("Invalid command. Please enter 'a'.")
+        print("")
 
     scan_time = float(input("Please enter the scan time in seconds: "))
 
     speed = np.linalg.norm(np.array(points[1]) - np.array(points[0])) / stage.steps_per_micron / scan_time
-    print(f"Calculated speed: {speed:.2f} µm/s")
+    print(f"Calculated speed: {speed:.4f} µm/s")
 
-    print("Running line scan.")
-    shutter.close()
-    stage.move_to(*points[0])
-    print(f"Currently at point #1 {points[0]}")
-    # Set the speed of the stage
-    stage.set_velocity(float(speed))
-    print(f"Stage velocity set to {stage.velocity:.2f} µm/s")
+    try:
+        print("")
+        print("Running line scan.")
+        # shutter.close()
+        # stage.move_to(*points[0])
+        print(f"Currently at point #2 {points[1]}")
+        # Set the speed of the stage
+        stage.set_velocity(speed)
+        print(f"Stage velocity set to {stage.velocity:.4f} µm/s")
+        print(f"ETA: {np.linalg.norm(np.array(points[0]) - np.array(points[1])) / stage.steps_per_micron / stage.velocity} sec")
+        print("Press Ctrl+C to interrupt")
 
-    shutter.open()
-    stage.move_to(*points[1])
-    print(f"Currently at point #2 {points[1]}")
-    shutter.close()
+        stage.move_to(*points[0])
+        print(f"Currently at point #1 {points[0]}")
 
-    # Reset speed to default: 100 intrinsic units/s
-    stage.set_velocity(100 / stage.steps_per_micron)
+        print("")
+        stage.set_velocity(100)
 
-    print('Line scan finished. You may now safely exit the program.')
-    print("=" * 40)
+        print('Line scan finished. You may now safely exit the program.')
+        print("=" * 40)
+        stage.close()
+    
+    except KeyboardInterrupt:
+        print("")
+        print("Keyboard interrupted!")
+        print("Stopping the current scan ...")
+        stage.close()
+        print('You may now safely exit the program.')
+        print("=" * 40)
+    finally:
+        stage.close()
+
+if __name__ == '__main__':
+    main()
