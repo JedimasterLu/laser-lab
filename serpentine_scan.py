@@ -157,6 +157,17 @@ def main():
         ax.scatter(scan_points_mm[0, 0], scan_points_mm[0, 1], c='g', s=40, label='Start')
         ax.scatter(scan_points_mm[-1, 0], scan_points_mm[-1, 1], c='k', s=40, label='End')
         ax.legend()
+        
+    # --- NEW IMAGE SAVING BLOCK ---
+    save_img_choice = input("Save an image of the ROI plot to 'roi_image.png'? (y/n): ")
+    if save_img_choice.lower() == 'y':
+        # dpi=300 makes it high resolution, bbox_inches='tight' removes excess white borders
+        plt.savefig("roi_image.png", dpi=300, bbox_inches='tight')
+        print("ROI image saved to 'roi_image.png'.")
+    else:
+        print("ROI image not saved.")
+    # ------------------------------
+
     plt.show()
     plt.close(fig)
 
