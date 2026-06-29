@@ -78,6 +78,8 @@ def main():
             
         print("Use the joystick to move to the first corner, then press 'a'.")
         print("Move to the opposite diagonal corner and press 'a' again.")
+        print("This will define the rectangle for the serpentine scan.")
+        print("Make sure that the two corners are within the view on the stage.")
             
         diagonal_points = []
         while len(diagonal_points) < 2:
@@ -158,13 +160,6 @@ def main():
         ax.scatter(scan_points_mm[-1, 0], scan_points_mm[-1, 1], c='k', s=40, label='End')
         ax.legend()
         
-    save_img_choice = input("Save an image of the ROI plot to 'roi_image.png'? (y/n): ")
-    if save_img_choice.lower() == 'y':
-        plt.savefig("roi_image.png", dpi=300, bbox_inches='tight')
-        print("ROI image saved to 'roi_image.png'.")
-    else:
-        print("ROI image not saved.")
-
     plt.show() # 1. Show the serpentine path generated
     plt.close(fig)
 
