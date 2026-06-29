@@ -78,9 +78,7 @@ def main():
             
         print("Use the joystick to move to the first corner, then press 'a'.")
         print("Move to the opposite diagonal corner and press 'a' again.")
-        print("This will define the rectangle for the serpentine scan.")
-        print("Make sure that the two corners are within the view on the screen.")
-            
+                    
         diagonal_points = []
         while len(diagonal_points) < 2:
             new_input = input("Enter command ('a' to add point): ").strip().lower()
@@ -186,20 +184,26 @@ def main():
     # 2. Prompt the user to turn off the laser
     input("WARNING: Please ensure the laser is TURNED OFF manually. Press Enter when confirmed...")
     
-    # 3. Go to the first spot on the path
-    print("Moving stage to the starting position of the scan...")
-    stage.move_to(*scan_points[0]) 
+    # 3. Go to the center of the ROI
+    print("Moving stage to the CENTER of the ROI for imaging...")
+    min_x, min_y, max_x, max_y = polygon.bounds
+    center_x = (min_x + max_x) / 2.0
+    center_y = (min_y + max_y) / 2.0
+    stage.move_to(center_x, center_y)
     
     # 4. Ask the user to take a picture
-    input("Stage is at the start position. Please take your picture manually now. Press Enter when done...")
+    input("Stage is centered on the ROI. Please take your picture manually now. Press Enter when done...")
+    
+    # 4.5 Move to the actual start point of the scan
+    print("Moving stage to the starting position of the scan...")
+    stage.move_to(*scan_points[0])
     
     # 5. Ask the user to turn on the laser again
     input("Please TURN ON the laser manually. Press Enter when ready to begin the automated scan...")
-
+    
     # 6. Run the path
     print("Starting scan...")
     try:
-        # Note: stage.move_to() is removed from here since we already moved it in step 3
         shutter.open()
         stage.scan(scan_points, interval_ms)  
     finally:
