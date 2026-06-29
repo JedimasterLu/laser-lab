@@ -140,7 +140,7 @@ def main():
         return
     
     # ---------------------------------------------------------
-    # 4. VISUALIZATION & HARDWARE EXECUTION
+    # 4. VISUALIZATION & DATA SAVING
     # ---------------------------------------------------------
     vertices_mm = vertices / (1000 * stage.steps_per_micron)
     scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
@@ -158,17 +158,14 @@ def main():
         ax.scatter(scan_points_mm[-1, 0], scan_points_mm[-1, 1], c='k', s=40, label='End')
         ax.legend()
         
-    # --- NEW IMAGE SAVING BLOCK ---
     save_img_choice = input("Save an image of the ROI plot to 'roi_image.png'? (y/n): ")
     if save_img_choice.lower() == 'y':
-        # dpi=300 makes it high resolution, bbox_inches='tight' removes excess white borders
         plt.savefig("roi_image.png", dpi=300, bbox_inches='tight')
         print("ROI image saved to 'roi_image.png'.")
     else:
         print("ROI image not saved.")
-    # ------------------------------
 
-    plt.show()
+    plt.show() # 1. Show the serpentine path generated
     plt.close(fig)
 
     save_choice = input("Save scan points to 'scan_points.csv'? (y/n): ")
@@ -178,7 +175,6 @@ def main():
     else:
         print("Scan points not saved.")
 
-    # Define interval on each scan point
     interval = input("Enter the interval (ms) to stay at the edges of each scan line: ")
     try:
         interval_ms = float(interval)
@@ -188,10 +184,27 @@ def main():
         print(f"Invalid interval: {e}")
         return
 
-    # Begin scan execution
-    input("Press Enter to start the scan...")
+    # ---------------------------------------------------------
+    # 5. MANUAL IMAGING PREP & HARDWARE EXECUTION
+    # ---------------------------------------------------------
+    print("\n--- Manual Pre-Scan Imaging ---")
+    # 2. Prompt the user to turn off the laser
+    input("WARNING: Please ensure the laser is TURNED OFF manually. Press Enter when confirmed...")
+    
+    # 3. Go to the first spot on the path
+    print("Moving stage to the starting position of the scan...")
+    stage.move_to(*scan_points[0]) 
+    
+    # 4. Ask the user to take a picture
+    input("Stage is at the start position. Please take your picture manually now. Press Enter when done...")
+    
+    # 5. Ask the user to turn on the laser again
+    input("Please TURN ON the laser manually. Press Enter when ready to begin the automated scan...")
+
+    # 6. Run the path
+    print("Starting scan...")
     try:
-        stage.move_to(*scan_points[0])
+        # Note: stage.move_to() is removed from here since we already moved it in step 3
         shutter.open()
         stage.scan(scan_points, interval_ms)  
     finally:
