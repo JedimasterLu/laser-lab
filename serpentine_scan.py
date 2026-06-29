@@ -79,7 +79,7 @@ def main():
         print("Use the joystick to move to the first corner, then press 'a'.")
         print("Move to the opposite diagonal corner and press 'a' again.")
         print("This will define the rectangle for the serpentine scan.")
-        print("Make sure that the two corners are within the view on the stage.")
+        print("Make sure that the two corners are within the view on the screen.")
             
         diagonal_points = []
         while len(diagonal_points) < 2:
