@@ -181,8 +181,14 @@ def main():
     # 5. MANUAL IMAGING PREP & HARDWARE EXECUTION
     # ---------------------------------------------------------
     print("\n--- Manual Pre-Scan Imaging ---")
-    # 2. Prompt the user to turn off the laser
-    input("WARNING: Please ensure the laser is TURNED OFF manually. Press Enter when confirmed...")
+    
+    # 1. Close shutter automatically just in case
+    if shutter.is_open():
+        shutter.close()
+        print("Shutter closed for safety.")
+    
+    # 2. Add an explicit pause to ensure physical safety
+    input("WARNING: Please ensure the laser is TURNED OFF or physically blocked manually. Press Enter when confirmed...")
     
     # 3. Go to the center of the ROI
     print("Moving stage to the CENTER of the ROI for imaging...")
@@ -192,28 +198,31 @@ def main():
     stage.move_to(center_x, center_y)
     
     # 4. Ask the user to take a picture
-    input("Stage is centered on the ROI. Please take your picture manually now. Press Enter when done...")
+    input("Stage is centered on the ROI. Please take your pre-scan picture manually now. Press Enter when done...")
     
-    # 4.5 Move to the actual start point of the scan
+    # 5. Move to the actual start point of the scan
     print("Moving stage to the starting position of the scan...")
     stage.move_to(*scan_points[0])
     
-    # 5. Ask the user to turn on the laser again
-    input("Please TURN ON the laser manually. Press Enter when ready to begin the automated scan...")
+    # 6. The "Arming" phase - explicit confirmation before firing
+    print("\n--- READY TO SCAN ---")
+    input("Stage is in position. Please TURN ON the laser manually. Press Enter when you are ready to open the shutter and begin...")
     
-    # 6. Run the path
+    # 7. Run the path safely
     print("Starting scan...")
     try:
         shutter.open()
+        # Optional: import time; time.sleep(0.5) # Add a tiny delay here if the shutter vibration blurs the start of the scan
         stage.scan(scan_points, interval_ms)  
     finally:
+        # The 'finally' block guarantees the shutter closes even if you hit Ctrl+C or the stage disconnects!
         shutter.close()
         print("Shutter safely closed.")
         
     print("Scan completed.")
     print('Serpentine scan finished. You may now safely exit the program.')
     print("=" * 40)
-    
+
 
 if __name__ == "__main__":
     main()
