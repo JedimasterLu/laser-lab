@@ -101,46 +101,57 @@ def main():
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
     
     # ---------------------------------------------------------
-    # 2. SMOOTH PATH & INTERVAL GENERATION
+    # 2. SERPENTINE PATH GENERATION WITH PRE-LOAD SETTINGS (STEP-SIZE AND SWEEP TIME)
     # ---------------------------------------------------------
-    print("\n--- Generating Smooth Serpentine Path ---")
-    y_step_um = float(input("Enter the desired distance between horizontal scan lines (um): "))
-    y_step = y_step_um * stage.steps_per_micron
+    print("Choose Serpentine Path Settings Method:")
+    print("1. Previous settings (if available)")
+    print("2. Define new settings manually")
     
+    settings_choice = ""
+    while settings_choice not in ["1", "2"]:
+        settings_choice = input("Enter choice (1 or 2): ").strip()
+    
+    if settings_choice == "1" and os.path.exists("serpentine_settings.npy"):
+        settings = np.load("serpentine_settings.npy", allow_pickle=True).item()
+        y_step_um, sweep_time = settings.get("y_step_um"), settings.get("sweep_time")
+        print(f"Loaded previous settings: y_step_um = {y_step_um} um")
+        print(f"Loaded previous settings: sweep_time = {sweep_time} s")
+    else:
+        if settings_choice == "1":
+            print("No saved settings found. Defaulting to new setup.")
+        y_step_um = float(input("Enter the desired distance between horizontal scan lines (um): "))
+        sweep_time_str = input("Enter the time (in seconds) it should take to sweep one horizontal line: ")
+        try:
+            sweep_time = float(sweep_time_str)
+            if sweep_time <= 0:
+                raise ValueError("Sweep time must be greater than 0.")
+        except ValueError as e:
+            print(f"Invalid time: {e}")
+            return
+        np.save("serpentine_settings.npy", {"y_step_um": y_step_um, "sweep_time": sweep_time})
+        print("Settings saved to 'serpentine_settings.npy' successfully.")
+        
+    
+    y_step = y_step_um * stage.steps_per_micron
     # This function guarantees a smooth hardware sweep by ONLY passing the edge coordinates
     scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, y_step=y_step)
-    
     print(f"Generated {len(scan_points)} scan points.")
     
-    # ---------------------------------------------------------
-    # 3. SPEED CONTROL (Velocity mapping)
-    # ---------------------------------------------------------
-    print("\n--- Speed Control ---")
-    sweep_time_str = input("Enter the time (in seconds) it should take to sweep one horizontal line: ")
-    try:
-        sweep_time = float(sweep_time_str)
-        if sweep_time <= 0:
-            raise ValueError("Sweep time must be greater than 0.")
-        
-        # Calculate physical width in microns using the polygon bounds
-        min_x, _, max_x, _ = polygon.bounds
-        width_steps = max_x - min_x
-        width_um = width_steps / stage.steps_per_micron
-        
-        # Calculate required velocity (microns / second)
-        velocity_um_s = width_um / sweep_time
-        print(f"Calculated line width: {width_um:.2f} um")
-        print(f"Setting stage velocity to {velocity_um_s:.2f} um/s to achieve a {sweep_time}s sweep.")
-        
-        # Command the hardware
-        stage.set_velocity(velocity_um_s)
-        
-    except ValueError as e:
-        print(f"Invalid time: {e}")
-        return
+    # Calculate physical width in microns using the polygon bounds
+    min_x, _, max_x, _ = polygon.bounds
+    width_steps = max_x - min_x
+    width_um = width_steps / stage.steps_per_micron
     
+    # Calculate required velocity (microns / second)
+    velocity_um_s = width_um / sweep_time
+    print(f"Calculated line width: {width_um:.2f} um")
+    print(f"Setting stage velocity to {velocity_um_s:.2f} um/s to achieve a {sweep_time}s sweep.")
+                
+    # Command the hardware
+    stage.set_velocity(velocity_um_s)
+        
     # ---------------------------------------------------------
-    # 4. VISUALIZATION & DATA SAVING
+    # 3. VISUALIZATION & DATA SAVING
     # ---------------------------------------------------------
     vertices_mm = vertices / (1000 * stage.steps_per_micron)
     scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
@@ -168,6 +179,7 @@ def main():
     else:
         print("Scan points not saved.")
 
+    '''
     interval = input("Enter the interval (ms) to stay at the edges of each scan line: ")
     try:
         interval_ms = float(interval)
@@ -176,9 +188,10 @@ def main():
     except ValueError as e:
         print(f"Invalid interval: {e}")
         return
-
+    '''
+    interval_ms=0
     # ---------------------------------------------------------
-    # 5. MANUAL IMAGING PREP & HARDWARE EXECUTION
+    # 4. MANUAL IMAGING PREP & HARDWARE EXECUTION
     # ---------------------------------------------------------
     print("\n--- Manual Pre-Scan Imaging ---")
     
