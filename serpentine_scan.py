@@ -62,20 +62,23 @@ def generate_rectangle_serpentine_path_smooth(bounds: tuple, step: float, direct
         raise ValueError("Direction must be either 'horizontal' or 'vertical'.")
 
 def main():
-    print("=" * 40)
-    print("Initiating serpentine scan ...")
+    print("=" * 60)
+    print("Initiating Batch Serpentine Scan Controller...")
+    print("=" * 60)
+    
+    # ---------------------------------------------------------
+    # 0. HARDWARE INITIALIZATION
+    # ---------------------------------------------------------
     stage = laserlab.ProScanStage(port="COM3")
     stage.position
     shutter = laserlab.SC30Shutter(port="COM6")
     shutter.set_mode('manual')
     shutter.close()
     
-    print("=" * 40)
-    
     # ---------------------------------------------------------
-    # 1. ROI DEFINITION & SAVING
+    # 1. ROI DEFINITION
     # ---------------------------------------------------------
-    print("Select ROI Method:")
+    print("\nSelect ROI Method:")
     print(" 1: Define NEW rectangle using joystick")
     print(" 2: Load PREVIOUS rectangle from memory")
     
@@ -104,156 +107,179 @@ def main():
                 print("Invalid command. Please enter 'a'.")
         try:
             vertices = generate_rectangle_vertices(diagonal_points[0], diagonal_points[1])
-            # Save the vertices to your local directory for next time
             np.save("roi_vertices.npy", vertices)
             print("Rectangle generated and saved to 'roi_vertices.npy' successfully.")
         except ValueError as e:
             print(f"Error: {e}")
-            return # Safely exit if the area is zero
+            return 
     
     polygon = Polygon(vertices)
     if (not polygon.is_valid) or polygon.area <= 0:
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
     
-    # ---------------------------------------------------------
-    # 2. SERPENTINE PATH GENERATION WITH PRE-LOAD SETTINGS
-    # ---------------------------------------------------------
-    print("Choose Serpentine Path Settings Method:")
-    print("1. Previous settings (if available)")
-    print("2. Define new settings manually")
-    
-    settings_choice = ""
-    while settings_choice not in ["1", "2"]:
-        settings_choice = input("Enter choice (1 or 2): ").strip()
-    
-    if settings_choice == "1" and os.path.exists("serpentine_settings.npy"):
-        settings = np.load("serpentine_settings.npy", allow_pickle=True).item()
-        # Fallback to old 'y_step_um' key if 'step_um' isn't found
-        step_um = settings.get("step_um", settings.get("y_step_um"))
-        sweep_time = settings.get("sweep_time")
-        direction = settings.get("direction", "horizontal")
-        
-        print(f"Loaded previous settings: direction = {direction}")
-        print(f"Loaded previous settings: step_um = {step_um} um")
-        print(f"Loaded previous settings: sweep_time = {sweep_time} s")
-    else:
-        if settings_choice == "1":
-            print("No saved settings found. Defaulting to new setup.")
-            
-        direction_choice = ""
-        while direction_choice not in ["1", "2"]:
-            direction_choice = input("Select scan direction (1: Horizontal, 2: Vertical): ").strip()
-        direction = "horizontal" if direction_choice == "1" else "vertical"
-        
-        step_um = float(input(f"Enter the desired distance between {direction} scan lines (um): "))
-        sweep_time_str = input(f"Enter the time (in seconds) it should take to sweep one {direction} line: ")
-        try:
-            sweep_time = float(sweep_time_str)
-            if sweep_time <= 0:
-                raise ValueError("Sweep time must be greater than 0.")
-        except ValueError as e:
-            print(f"Invalid time: {e}")
-            return
-            
-        np.save("serpentine_settings.npy", {"step_um": step_um, "sweep_time": sweep_time, "direction": direction})
-        print("Settings saved to 'serpentine_settings.npy' successfully.")
-        
-    step_steps = step_um * stage.steps_per_micron
-    
-    # Pass the direction variable into the generation function
-    scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, step=step_steps, direction=direction)
-    print(f"Generated {len(scan_points)} scan points.")
-    
-    # Dynamically calculate physical distance based on direction
     min_x, min_y, max_x, max_y = polygon.bounds
-    if direction == 'horizontal':
-        sweep_distance_steps = max_x - min_x
-    else:
-        sweep_distance_steps = max_y - min_y
-        
-    sweep_distance_um = sweep_distance_steps / stage.steps_per_micron
+
+    # ---------------------------------------------------------
+    # 2. BATCH SCHEDULE BUILDER
+    # ---------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("SCAN SCHEDULE CONFIGURATION")
+    print("=" * 60)
     
-    # Calculate required velocity (microns / second)
-    velocity_um_s = sweep_distance_um / sweep_time
-    print(f"Calculated sweep line distance: {sweep_distance_um:.2f} um")
-    print(f"Setting stage velocity to {velocity_um_s:.2f} um/s to achieve a {sweep_time}s sweep.")
+    while True:
+        try:
+            num_settings = int(input("How many DIFFERENT combinations of step-size, direction, and sweep-time do you want to run? "))
+            if num_settings > 0:
+                break
+        except ValueError:
+            print("Please enter a valid number.")
+
+    scan_schedule = []
+
+    for i in range(num_settings):
+        print(f"\n--- Configuration {i+1} of {num_settings} ---")
+        
+        dir_choice = ""
+        while dir_choice not in ["1", "2"]:
+            dir_choice = input("Select scan direction (1: Horizontal, 2: Vertical): ").strip()
+        direction = "horizontal" if dir_choice == "1" else "vertical"
+        
+        while True:
+            try:
+                step_um = float(input(f"Enter distance between {direction} scan lines (um): "))
+                sweep_time = float(input(f"Enter time to sweep one {direction} line (s): "))
+                if sweep_time <= 0 or step_um <= 0:
+                    raise ValueError("Values must be greater than 0.")
+                break
+            except ValueError as e:
+                print(f"Invalid input: {e}. Try again.")
+
+        while True:
+            try:
+                num_runs = int(input(f"How many iterations (runs) for Configuration {i+1}? "))
+                if num_runs > 0:
+                    break
+            except ValueError:
+                print("Please enter a valid number.")
                 
-    # Command the hardware
-    stage.set_velocity(velocity_um_s)
-        
-    # ---------------------------------------------------------
-    # 3. VISUALIZATION & DATA SAVING
-    # ---------------------------------------------------------
-    vertices_mm = vertices / (1000 * stage.steps_per_micron)
-    scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
+        scan_schedule.append({
+            "config_num": i + 1,
+            "direction": direction,
+            "step_um": step_um,
+            "sweep_time": sweep_time,
+            "iterations": num_runs
+        })
 
-    # Visualize the defined polygon
-    fig, ax = plt.subplots()
-    ax.plot(vertices_mm[:, 0], vertices_mm[:, 1], 'ro-')
-    ax.set_title(f"Defined Polygon ({direction.capitalize()} Scan)")
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
-    ax.fill(vertices_mm[:, 0], vertices_mm[:, 1], alpha=0.3)
-    if len(scan_points_mm) > 0:
-        ax.plot(scan_points_mm[:, 0], scan_points_mm[:, 1], 'b.-', lw=0.8, ms=2)
-        ax.scatter(scan_points_mm[0, 0], scan_points_mm[0, 1], c='g', s=40, label='Start')
-        ax.scatter(scan_points_mm[-1, 0], scan_points_mm[-1, 1], c='k', s=40, label='End')
-        ax.legend()
-        
-    plt.show() # 1. Show the serpentine path generated
-    plt.close(fig)
+    # Save the schedule in case you need to review what you ran later
+    np.save("last_scan_schedule.npy", scan_schedule)
+    
+    total_runs = sum(config["iterations"] for config in scan_schedule)
+    print(f"\nTotal runs scheduled across all configurations: {total_runs}")
 
-    save_choice = input("Save scan points to 'scan_points.csv'? (y/n): ")
-    if save_choice.lower() == 'y':
-        np.savetxt("scan_points.csv", scan_points, delimiter=",", header="x_steps,y_steps", comments="")
-        print("Scan points saved to 'scan_points.csv'.")
-    else:
-        print("Scan points not saved.")
-
-    interval_ms=0
     # ---------------------------------------------------------
-    # 4. MANUAL IMAGING PREP & HARDWARE EXECUTION
+    # 3. MASTER EXECUTION LOOP
     # ---------------------------------------------------------
-    print("\n--- Manual Pre-Scan Imaging ---")
+    interval_ms = 0
+    run_counter = 1
     
-    # 1. Close shutter automatically just in case
-    if shutter.is_open():
-        shutter.close()
-        print("Shutter closed for safety.")
-    
-    # 2. Add an explicit pause to ensure physical safety
-    input("WARNING: Please ensure the laser is TURNED OFF or physically blocked manually. Press Enter when confirmed...")
-    
-    # 3. Go to the center of the ROI
-    print("Moving stage to the CENTER of the ROI for imaging...")
-    center_x = (min_x + max_x) / 2.0
-    center_y = (min_y + max_y) / 2.0
-    stage.move_to(center_x, center_y)
-    
-    # 4. Ask the user to take a picture
-    input("Stage is centered on the ROI. Please take your pre-scan picture manually now. Press Enter when done...")
-    
-    # 5. Move to the actual start point of the scan
-    print("Moving stage to the starting position of the scan...")
-    stage.move_to(*scan_points[0])
-    
-    # 6. The "Arming" phase - explicit confirmation before firing
-    print("\n--- READY TO SCAN ---")
-    input("Stage is in position. Please TURN ON the laser manually. Press Enter when you are ready to open the shutter and begin...")
-    
-    # 7. Run the path safely
-    print("Starting scan...")
-    try:
-        shutter.open()
-        stage.scan(scan_points, interval_ms)  
-    finally:
-        # The 'finally' block guarantees the shutter closes even if you hit Ctrl+C or the stage disconnects!
-        shutter.close()
-        print("Shutter safely closed.")
+    for config in scan_schedule:
+        print("\n" + "=" * 60)
+        print(f"INITIALIZING CONFIGURATION {config['config_num']}")
+        print(f"Settings: {config['direction'].capitalize()} | Step: {config['step_um']}um | Time: {config['sweep_time']}s | Runs: {config['iterations']}")
+        print("=" * 60)
         
-    print("Scan completed.")
-    print('Serpentine scan finished. You may now safely exit the program.')
-    print("=" * 40)
+        # --- Generate Path for Current Config ---
+        step_steps = config['step_um'] * stage.steps_per_micron
+        scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, step=step_steps, direction=config['direction'])
+        
+        # --- Calculate Velocity for Current Config ---
+        if config['direction'] == 'horizontal':
+            sweep_distance_steps = max_x - min_x
+        else:
+            sweep_distance_steps = max_y - min_y
+            
+        sweep_distance_um = sweep_distance_steps / stage.steps_per_micron
+        velocity_um_s = sweep_distance_um / config['sweep_time']
+        
+        print(f"Generated {len(scan_points)} scan points.")
+        print(f"Calculated sweep line distance: {sweep_distance_um:.2f} um")
+        print(f"Setting stage velocity to {velocity_um_s:.2f} um/s.")
+        
+        stage.set_velocity(velocity_um_s)
+        
+        # --- Visualization & Saving (Once per config) ---
+        vertices_mm = vertices / (1000 * stage.steps_per_micron)
+        scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
+
+        fig, ax = plt.subplots()
+        ax.plot(vertices_mm[:, 0], vertices_mm[:, 1], 'ro-')
+        ax.set_title(f"Config {config['config_num']}: {config['direction'].capitalize()} Scan")
+        ax.set_xlabel("X (mm)")
+        ax.set_ylabel("Y (mm)")
+        ax.fill(vertices_mm[:, 0], vertices_mm[:, 1], alpha=0.3)
+        if len(scan_points_mm) > 0:
+            ax.plot(scan_points_mm[:, 0], scan_points_mm[:, 1], 'b.-', lw=0.8, ms=2)
+            ax.scatter(scan_points_mm[0, 0], scan_points_mm[0, 1], c='g', s=40, label='Start')
+            ax.scatter(scan_points_mm[-1, 0], scan_points_mm[-1, 1], c='k', s=40, label='End')
+            ax.legend()
+            
+        print("Plotting path... Close the window to proceed with the hardware execution.")
+        plt.show() 
+        plt.close(fig)
+
+        save_choice = input(f"Save scan points for Config {config['config_num']} to CSV? (y/n): ")
+        if save_choice.lower() == 'y':
+            filename = f"scan_points_config_{config['config_num']}.csv"
+            np.savetxt(filename, scan_points, delimiter=",", header="x_steps,y_steps", comments="")
+            print(f"Saved to '{filename}'.")
+
+        # --- Execute Iterations for Current Config ---
+        for iteration in range(config['iterations']):
+            print(f"\n--- RUN {run_counter}/{total_runs} (Iteration {iteration+1} of Config {config['config_num']}) ---")
+            
+            # 1. Shutter Safety Check
+            if shutter.is_open():
+                shutter.close()
+            
+            # 2. Laser Off / Blocked Confirmation
+            #input("WARNING: Ensure laser is TURNED OFF manually. Press Enter when confirmed...")
+            
+            # 3. Center for Pre-Scan Image
+            print("Moving to ROI center...")
+            center_x = (min_x + max_x) / 2.0
+            center_y = (min_y + max_y) / 2.0
+            stage.move_to(center_x, center_y)
+            
+            input("Stage centered. Please take pre-scan picture now. Press Enter when done...")
+            
+            # 4. Move to Start Point
+            print("Moving to scan starting position...")
+            stage.move_to(*scan_points[0])
+            
+            # 5. Arm & Execute
+            print("\n--- READY TO SCAN ---")
+            #input(f"Stage in position for Run {run_counter}. TURN ON laser manually. Press Enter to begin...")
+            
+            print("Scanning...")
+            try:
+                shutter.open()
+                stage.scan(scan_points, interval_ms)  
+            finally:
+                shutter.close()
+                print("Shutter safely closed.")
+                
+            print(f"Run {run_counter} completed.")
+            
+            # 6. Post-Scan Image / Pause before next iteration
+            print("Moving back to ROI center for post-scan imaging...")
+            stage.move_to(center_x, center_y)
+            input("Stage centered. Take post-scan picture if needed. Press Enter to continue to the next run...")
+            
+            run_counter += 1
+
+    print("\n" + "=" * 60)
+    print("ALL SCHEDULED RUNS COMPLETED SUCCESSFULLY.")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()
