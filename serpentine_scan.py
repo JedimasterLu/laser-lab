@@ -30,21 +30,36 @@ def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]
     
     return np.array(vertices)
 
-def generate_rectangle_serpentine_path_smooth(bounds: tuple, y_step: float) -> np.ndarray:
-    """Generate smooth serpentine points using only row endpoints."""
+def generate_rectangle_serpentine_path_smooth(bounds: tuple, step: float, direction: str = 'horizontal') -> np.ndarray:
+    """
+    Generate smooth serpentine points using only row/column endpoints.
+    
+    Args:
+        bounds (tuple): (min_x, min_y, max_x, max_y)
+        step (float): The distance between each scan line in stage steps.
+        direction (str): 'horizontal' or 'vertical'.
+    """
     min_x, min_y, max_x, max_y = bounds
     
-    # Generate the Y 'rungs' normally
-    y_values = np.arange(min_y, max_y + y_step, y_step)
-    
-    # Only use the absolute start and end of the X bounds
-    x_values = np.array([min_x, max_x])
-    
-    # Create the grids and flip the odd rows
-    X, Y = np.meshgrid(x_values, y_values)
-    X[1::2, :] = X[1::2, ::-1]
-    
-    return np.column_stack((X.ravel(), Y.ravel()))
+    if direction == 'horizontal':
+        y_values = np.arange(min_y, max_y + step, step)
+        x_values = np.array([min_x, max_x])
+        
+        X, Y = np.meshgrid(x_values, y_values)
+        X[1::2, :] = X[1::2, ::-1]
+        return np.column_stack((X.ravel(), Y.ravel()))
+        
+    elif direction == 'vertical':
+        x_values = np.arange(min_x, max_x + step, step)
+        y_values = np.array([min_y, max_y])
+        
+        X, Y = np.meshgrid(x_values, y_values)
+        X_t, Y_t = X.T, Y.T
+        Y_t[1::2, :] = Y_t[1::2, ::-1]
+        return np.column_stack((X_t.ravel(), Y_t.ravel()))
+        
+    else:
+        raise ValueError("Direction must be either 'horizontal' or 'vertical'.")
 
 def main():
     print("=" * 40)
@@ -101,7 +116,7 @@ def main():
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
     
     # ---------------------------------------------------------
-    # 2. SERPENTINE PATH GENERATION WITH PRE-LOAD SETTINGS (STEP-SIZE AND SWEEP TIME)
+    # 2. SERPENTINE PATH GENERATION WITH PRE-LOAD SETTINGS
     # ---------------------------------------------------------
     print("Choose Serpentine Path Settings Method:")
     print("1. Previous settings (if available)")
@@ -113,14 +128,25 @@ def main():
     
     if settings_choice == "1" and os.path.exists("serpentine_settings.npy"):
         settings = np.load("serpentine_settings.npy", allow_pickle=True).item()
-        y_step_um, sweep_time = settings.get("y_step_um"), settings.get("sweep_time")
-        print(f"Loaded previous settings: y_step_um = {y_step_um} um")
+        # Fallback to old 'y_step_um' key if 'step_um' isn't found
+        step_um = settings.get("step_um", settings.get("y_step_um"))
+        sweep_time = settings.get("sweep_time")
+        direction = settings.get("direction", "horizontal")
+        
+        print(f"Loaded previous settings: direction = {direction}")
+        print(f"Loaded previous settings: step_um = {step_um} um")
         print(f"Loaded previous settings: sweep_time = {sweep_time} s")
     else:
         if settings_choice == "1":
             print("No saved settings found. Defaulting to new setup.")
-        y_step_um = float(input("Enter the desired distance between horizontal scan lines (um): "))
-        sweep_time_str = input("Enter the time (in seconds) it should take to sweep one horizontal line: ")
+            
+        direction_choice = ""
+        while direction_choice not in ["1", "2"]:
+            direction_choice = input("Select scan direction (1: Horizontal, 2: Vertical): ").strip()
+        direction = "horizontal" if direction_choice == "1" else "vertical"
+        
+        step_um = float(input(f"Enter the desired distance between {direction} scan lines (um): "))
+        sweep_time_str = input(f"Enter the time (in seconds) it should take to sweep one {direction} line: ")
         try:
             sweep_time = float(sweep_time_str)
             if sweep_time <= 0:
@@ -128,23 +154,28 @@ def main():
         except ValueError as e:
             print(f"Invalid time: {e}")
             return
-        np.save("serpentine_settings.npy", {"y_step_um": y_step_um, "sweep_time": sweep_time})
+            
+        np.save("serpentine_settings.npy", {"step_um": step_um, "sweep_time": sweep_time, "direction": direction})
         print("Settings saved to 'serpentine_settings.npy' successfully.")
         
+    step_steps = step_um * stage.steps_per_micron
     
-    y_step = y_step_um * stage.steps_per_micron
-    # This function guarantees a smooth hardware sweep by ONLY passing the edge coordinates
-    scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, y_step=y_step)
+    # Pass the direction variable into the generation function
+    scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, step=step_steps, direction=direction)
     print(f"Generated {len(scan_points)} scan points.")
     
-    # Calculate physical width in microns using the polygon bounds
-    min_x, _, max_x, _ = polygon.bounds
-    width_steps = max_x - min_x
-    width_um = width_steps / stage.steps_per_micron
+    # Dynamically calculate physical distance based on direction
+    min_x, min_y, max_x, max_y = polygon.bounds
+    if direction == 'horizontal':
+        sweep_distance_steps = max_x - min_x
+    else:
+        sweep_distance_steps = max_y - min_y
+        
+    sweep_distance_um = sweep_distance_steps / stage.steps_per_micron
     
     # Calculate required velocity (microns / second)
-    velocity_um_s = width_um / sweep_time
-    print(f"Calculated line width: {width_um:.2f} um")
+    velocity_um_s = sweep_distance_um / sweep_time
+    print(f"Calculated sweep line distance: {sweep_distance_um:.2f} um")
     print(f"Setting stage velocity to {velocity_um_s:.2f} um/s to achieve a {sweep_time}s sweep.")
                 
     # Command the hardware
@@ -159,7 +190,7 @@ def main():
     # Visualize the defined polygon
     fig, ax = plt.subplots()
     ax.plot(vertices_mm[:, 0], vertices_mm[:, 1], 'ro-')
-    ax.set_title("Defined Polygon")
+    ax.set_title(f"Defined Polygon ({direction.capitalize()} Scan)")
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.fill(vertices_mm[:, 0], vertices_mm[:, 1], alpha=0.3)
@@ -179,16 +210,6 @@ def main():
     else:
         print("Scan points not saved.")
 
-    '''
-    interval = input("Enter the interval (ms) to stay at the edges of each scan line: ")
-    try:
-        interval_ms = float(interval)
-        if interval_ms < 0:
-            raise ValueError("Interval must be non-negative.")
-    except ValueError as e:
-        print(f"Invalid interval: {e}")
-        return
-    '''
     interval_ms=0
     # ---------------------------------------------------------
     # 4. MANUAL IMAGING PREP & HARDWARE EXECUTION
@@ -205,7 +226,6 @@ def main():
     
     # 3. Go to the center of the ROI
     print("Moving stage to the CENTER of the ROI for imaging...")
-    min_x, min_y, max_x, max_y = polygon.bounds
     center_x = (min_x + max_x) / 2.0
     center_y = (min_y + max_y) / 2.0
     stage.move_to(center_x, center_y)
@@ -225,7 +245,6 @@ def main():
     print("Starting scan...")
     try:
         shutter.open()
-        # Optional: import time; time.sleep(0.5) # Add a tiny delay here if the shutter vibration blurs the start of the scan
         stage.scan(scan_points, interval_ms)  
     finally:
         # The 'finally' block guarantees the shutter closes even if you hit Ctrl+C or the stage disconnects!
@@ -235,7 +254,6 @@ def main():
     print("Scan completed.")
     print('Serpentine scan finished. You may now safely exit the program.')
     print("=" * 40)
-
 
 if __name__ == "__main__":
     main()
