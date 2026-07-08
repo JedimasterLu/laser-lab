@@ -31,7 +31,7 @@ def main():
 
     scan_time = float(input("Please enter the scan time in seconds: "))
 
-    speed = np.linalg.norm(np.array(points[1]) - np.array(points[0])) / stage.steps_per_micron / scan_time
+    speed = float(np.linalg.norm(np.array(points[1]) - np.array(points[0])) / stage.steps_per_micron / scan_time)
     print(f"Calculated speed: {speed:.4f} µm/s")
 
     try:
