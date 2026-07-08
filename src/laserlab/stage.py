@@ -26,7 +26,12 @@ class ProScanStage:
     
     @property
     def velocity(self) -> float:
-        self.ser.write("SMS,i\r".encode())
+        """The maximum velocity of stage.
+
+        Returns:
+            float: in microns/s.
+        """
+        self.ser.write("SMS,u\r".encode())
         return float(self.ser.read_until(b"\r").decode().strip())
 
     def is_close(
@@ -77,8 +82,12 @@ class ProScanStage:
         command = f"G {x},{y}\r".encode()
         self.ser.write(command)
         response = self.ser.read_until(b"\r").decode().strip()
-        if response != "R":
-            raise RuntimeWarning("Stage is not correctly moving!")
+        # if response != "R":
+        #     raise RuntimeWarning("Stage is not correctly moving!")
+        for _ in range(1000):
+            if response != "R":
+                time.sleep(1e-2)
+                response = self.ser.read_until(b"\r").decode().strip()
 
     def move_by(self, dx: float, dy: float):
         dx, dy = int(dx), int(dy)
@@ -100,5 +109,27 @@ class ProScanStage:
             elif isinstance(intervals, (int, float)):
                 time.sleep(intervals)
 
+    def set_velocity(self, velocity: float):
+        """Set the maximum velocity of stage.
+
+        Args:
+            velocity (float): in microns/s.
+        """
+        message = f"SMS,{velocity},u\r".encode()
+        self.ser.write(message)
+        response = self.ser.read_until(b"\r").decode().strip()
+        if response != "0":
+            raise RuntimeWarning("Failed to set velocity!")
+        self._velocity = velocity
+
     def close(self):
+        if not self.ser.is_open:
+            return
+        message = "I\r".encode()
+        self.ser.write(message)
+        time.sleep(0.1)
         self.ser.close()
+
+    def __del__(self):
+        if self.ser.is_open:
+            self.close()
