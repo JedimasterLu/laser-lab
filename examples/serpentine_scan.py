@@ -30,6 +30,52 @@ def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]
     
     return np.array(vertices)
 
+def generate_rectangle_vertices_with_point_and_diagonal_length(p1: tuple[float, float], square_side_length: float, rel_pos: str) -> np.ndarray:
+    """
+    Generate square bounding vertices using one given point, its position relative to the rest of the square, and the 
+    side length. The function calculates the other three vertices based on the provided point and side length.
+    
+    Args:
+        p1 (tuple[float, float]): The reference coordinate (x, y).
+        square_side_length (float): The length of the sides of the square.
+        rel_pos (str): Position of p1. Options: 'bottom-left', 'bottom-right', 'top-left', 'top-right'.
+
+    Returns:
+        np.ndarray: A 4x2 array of vertices in sequential order (bottom-left, bottom-right, top-right, top-left) 
+                    to form a valid polygon.
+    """
+    x1, y1 = p1
+    side = square_side_length
+    
+    # Standardize the input string to prevent capitalization/spacing errors
+    rel_pos = rel_pos.lower().strip()
+    
+    # Calculate min and max bounds based on where the reference point is
+    if rel_pos == 'bottom-left':
+        min_x, min_y = x1, y1
+        max_x, max_y = x1 + side, y1 + side
+    elif rel_pos == 'bottom-right':
+        max_x, min_y = x1, y1
+        min_x, max_y = x1 - side, y1 + side
+    elif rel_pos == 'top-left':
+        min_x, max_y = x1, y1
+        max_x, min_y = x1 + side, y1 - side
+    elif rel_pos == 'top-right':
+        max_x, max_y = x1, y1
+        min_x, min_y = x1 - side, y1 - side
+    else:
+        raise ValueError("rel_pos must be 'bottom-left', 'bottom-right', 'top-left', or 'top-right'")
+        
+    # Return vertices sequentially to form a valid polygon
+    vertices = np.array([
+        [min_x, min_y],  # Bottom-Left
+        [max_x, min_y],  # Bottom-Right
+        [max_x, max_y],  # Top-Right
+        [min_x, max_y]   # Top-Left
+    ])
+    
+    return vertices
+    
 def generate_rectangle_serpentine_path_smooth(bounds: tuple, step: float, direction: str = 'horizontal') -> np.ndarray:
     """
     Generate smooth serpentine points using only row/column endpoints.
@@ -94,25 +140,41 @@ def main():
         if roi_choice == "2":
             print("No saved ROI found. Defaulting to new setup.")
             
-        print("Use the joystick to move to the first corner, then press 'a'.")
-        print("Move to the opposite diagonal corner and press 'a' again.")
-                    
-        diagonal_points = []
-        while len(diagonal_points) < 2:
-            new_input = input("Enter command ('a' to add point): ").strip().lower()
-            if new_input == "a":
-                diagonal_points.append(stage.position)
-                print(f"Corner {len(diagonal_points)} added: {stage.position}")
-            else:
-                print("Invalid command. Please enter 'a'.")
-        try:
-            vertices = generate_rectangle_vertices(diagonal_points[0], diagonal_points[1])
+        rectangle_method = ""
+        while rectangle_method not in ["1", "2"]:
+            print("\nSelect Rectangle Definition Method:")
+            print(" 1: Define using two diagonal corners")
+            print(" 2: Define using one corner and side length")
+            rectangle_method = input("Enter choice (1 or 2): ").strip()
+        
+        if rectangle_method == "1":
+            print("Use the joystick to move to the first corner, then press 'a'.")
+            print("Move to the opposite diagonal corner and press 'a' again.")
+                        
+            diagonal_points = []
+            while len(diagonal_points) < 2:
+                new_input = input("Enter command ('a' to add point): ").strip().lower()
+                if new_input == "a":
+                    diagonal_points.append(stage.position)
+                    print(f"Corner {len(diagonal_points)} added: {stage.position}")
+                else:
+                    print("Invalid command. Please enter 'a'.")
+            try:
+                vertices = generate_rectangle_vertices(diagonal_points[0], diagonal_points[1])
+                np.save("roi_vertices.npy", vertices)
+                print("Rectangle generated and saved to 'roi_vertices.npy' successfully.")
+            except ValueError as e:
+                print(f"Error: {e}")
+                return 
+        else:
+            print("Use the joystick to move to the reference corner, then press 'a'.")    
+            side_length = float(input("Enter the side length of the square in microns: "))
+            vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
+            
+            vertices = generate_rectangle_vertices_with_point_and_diagonal_length(stage.position, side_length, vert_rel_position)
             np.save("roi_vertices.npy", vertices)
-            print("Rectangle generated and saved to 'roi_vertices.npy' successfully.")
-        except ValueError as e:
-            print(f"Error: {e}")
-            return 
-    
+            print("Square generated and saved to 'roi_vertices.npy' successfully.")
+            
     polygon = Polygon(vertices)
     if (not polygon.is_valid) or polygon.area <= 0:
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
