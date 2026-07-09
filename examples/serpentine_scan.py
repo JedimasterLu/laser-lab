@@ -168,10 +168,11 @@ def main():
                 return 
         else:
             print("Use the joystick to move to the reference corner, then press 'a'.")    
-            side_length = float(input("Enter the side length of the square in microns: "))
+            side_length_um = float(input("Enter the side length of the square in microns: "))
+            side_length_steps = side_length_um * stage.steps_per_micron
             vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
             
-            vertices = generate_rectangle_vertices_with_point_and_diagonal_length(stage.position, side_length, vert_rel_position)
+            vertices = generate_rectangle_vertices_with_point_and_diagonal_length(stage.position, side_length_steps, vert_rel_position)
             np.save("roi_vertices.npy", vertices)
             print("Square generated and saved to 'roi_vertices.npy' successfully.")
             
