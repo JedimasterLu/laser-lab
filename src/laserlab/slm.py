@@ -18,7 +18,7 @@ Example:
     >>> with EXULUS() as slm:  # doctest: +SKIP
     ...     slm.set_phase_stroke(1)
     ...     slm.set_hflip(True)
-    ...     slm.show_image("target.png")
+    ...     slm.show_image("target.png", hold_seconds=3.0)
 
     On macOS / Linux (no DLLs available), run with
     ``LASERLAB_MOCK=1 python my_script.py``.
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import ctypes
 from pathlib import Path
 from typing import Any, Optional, Protocol
@@ -783,10 +784,13 @@ class EXULUS:
     pitch, 1550 nm laser, 0.25 m focal distance, 5.162 µm phase stroke.
     """
 
-    # Resize modes (forwarded to CghImageResize)
-    RESIZE_FILL = 0     # stretch to fill
-    RESIZE_FIT = 1      # fit inside, pad with background
-    RESIZE_STRETCH = 2  # alias for fill in the SDK
+    # Resize modes (forwarded to CghImageResize, see cgh_lib.h `enum resize_mode`).
+    # These values MUST match the SDK's C enum, otherwise the wrong resize
+    # strategy is used silently (e.g. FILL=0 would actually invoke CENTER).
+    RESIZE_CENTER = 0   # place at native size, center on screen, pad with background
+    RESIZE_FIT = 1      # fit inside the screen, pad with background (preserve aspect)
+    RESIZE_FILL = 2     # stretch to fill the screen (ignore aspect)
+    RESIZE_STRETCH = 3  # alias for FILL with no padding
 
     def __init__(
         self,
@@ -1005,8 +1009,9 @@ class EXULUS:
 
         Args:
             path: Path to a PNG / JPG / etc. readable by OpenCV.
-            resize_mode: One of :attr:`RESIZE_FILL`, :attr:`RESIZE_FIT`,
-                :attr:`RESIZE_STRETCH`.
+            resize_mode: One of :attr:`RESIZE_CENTER`, :attr:`RESIZE_FIT`,
+                :attr:`RESIZE_FILL`, :attr:`RESIZE_STRETCH`. The values
+                match the SDK's ``enum resize_mode``.
             background: Padding colour (0-255) for fitting modes.
 
         Returns:
@@ -1132,8 +1137,9 @@ class EXULUS:
 
         Args:
             image: Grayscale (``H x W``) or BGR (``H x W x 3``) image.
-            resize_mode: One of :attr:`RESIZE_FILL`, :attr:`RESIZE_FIT`,
-                :attr:`RESIZE_STRETCH`.
+            resize_mode: One of :attr:`RESIZE_CENTER`, :attr:`RESIZE_FIT`,
+                :attr:`RESIZE_FILL`, :attr:`RESIZE_STRETCH`. The values
+                match the SDK's ``enum resize_mode``.
             background: Padding colour for fitting modes.
 
         Returns:
@@ -1157,6 +1163,7 @@ class EXULUS:
         background: int = 0,
         monitor: int = 1,
         title: str = "EXULUS SLM",
+        hold_seconds: float = 0.0,
     ) -> np.ndarray:
         """End-to-end: read image file -> compute CGH -> display on SLM.
 
@@ -1164,11 +1171,22 @@ class EXULUS:
 
         Args:
             path: Image file readable by OpenCV.
-            resize_mode: One of :attr:`RESIZE_FILL`, :attr:`RESIZE_FIT`,
-                :attr:`RESIZE_STRETCH`.
-            background: Padding colour for fitting modes.
-            monitor: 1-based monitor index for :meth:`open_display`.
+            resize_mode: One of :attr:`RESIZE_CENTER`, :attr:`RESIZE_FIT`,
+                :attr:`RESIZE_FILL`, :attr:`RESIZE_STRETCH`. The values
+                match the SDK's ``enum resize_mode``; using a wrong value
+                silently activates a different strategy.
+            background: Padding colour (0-255) for center/fit/fill modes.
+            monitor: 1-based monitor index for :meth:`open_display`. The
+                SDK creates a fullscreen window on this monitor, so pick
+                the index of the physical SLM panel (otherwise the main
+                screen goes black).
             title: Window title for :meth:`open_display`.
+            hold_seconds: How long to keep the display window alive
+                after pushing the frame, in seconds. The previous
+                behaviour returned immediately (image disappeared as
+                soon as the caller exited its ``with`` block); pass a
+                positive value to keep the SLM showing the pattern.
+                ``0`` (default) preserves the legacy no-wait semantics.
 
         Returns:
             The computed phase pattern.
@@ -1178,6 +1196,8 @@ class EXULUS:
             self.open_display(monitor=monitor, title=title)
         phase = self.compute_cgh(gray)
         self.show_phase(phase)
+        if hold_seconds > 0:
+            time.sleep(hold_seconds)
         return phase
 
     # ---- internals --------------------------------------------------------
