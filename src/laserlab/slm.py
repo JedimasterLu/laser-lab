@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
+import ctypes
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -130,6 +131,8 @@ class _RealBackend:
 
         old_cwd = os.getcwd()
         os.chdir(sdk_dir)
+        sys.path.insert(0, str(sdk_dir))
+        os.add_dll_directory(str(sdk_dir))
         try:
             from EXULUS_COMMAND_LIB import (  # type: ignore[import-not-found]
                 EXULUSCheckCommunication,
@@ -474,7 +477,8 @@ class _RealBackend:
         Raises:
             RuntimeError: If the SDK returns a negative status.
         """
-        rc = self._cgh["calc"](hdl, buffer, stroke_m)
+        buffer = np.ascontiguousarray(buffer, dtype=np.uint8)
+        rc = self._cgh["calc"](hdl, buffer.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte)), stroke_m)
         if rc < 0:
             raise RuntimeError(f"CghCoreCalc -> {rc}")
         return rc
