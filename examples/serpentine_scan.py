@@ -278,7 +278,7 @@ def main():
     if sched_mode == "1":
         while True:
             try:
-                repeats = int(input("How many times do you want to run this full sequence? "))
+                repeats = int(input("How many times do you want to run this full sequence (1,2,3,... in that order, how many times)? "))
                 if repeats > 0: break
             except ValueError:
                 print("Please enter a valid number.")
@@ -290,7 +290,8 @@ def main():
     elif sched_mode == "2":
         while True:
             try:
-                num_phases = int(input("\nHow many execution phases (blocks) do you want to schedule? "))
+                print("Here, you can define different combinations of the configuration settings in multiple phases.")
+                num_phases = int(input("\nHow many execution phases (blocks) do you want to schedule?"))
                 if num_phases > 0: break
             except ValueError:
                 print("Please enter a valid number.")
@@ -298,6 +299,7 @@ def main():
         for phase in range(1, num_phases + 1):
             print(f"\n--- Phase {phase} ---")
             while True:
+                print(f"Here, enter the combinations you want in the {phase} phase.")
                 seq_input = input("Enter the Config IDs to run in sequence, separated by commas (e.g., '1,3' or '1,2,3'): ")
                 try:
                     sequence = [int(x.strip()) for x in seq_input.split(',')]
