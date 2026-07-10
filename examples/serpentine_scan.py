@@ -167,7 +167,12 @@ def main():
                 print(f"Error: {e}")
                 return 
         else:
-            print("Use the joystick to move to the reference corner, then press 'a'.")    
+            print("Use the joystick to move to the reference corner, then press 'a'.")   
+            point = []
+            new_input = input("Enter command ('a' to add point): ").strip().lower()
+            if new_input == "a":
+                point.append(stage.position)
+                print(f"Point added: {stage.position}") 
             side_length_um = float(input("Enter the side length of the square in microns: "))
             side_length_steps = side_length_um * stage.steps_per_micron
             vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
