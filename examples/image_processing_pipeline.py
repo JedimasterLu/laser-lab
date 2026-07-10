@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 
 def process_bubble_frame(frame, cb_area_min=50, bubble_area_min=690):
     """
