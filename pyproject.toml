@@ -5,10 +5,13 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "cupy-cuda12x[ctk]>=14.1.1",
     "matplotlib>=3.10.9",
     "opencv-python>=5.0.0.93",
+    "pyglet>=2.1.15",
     "pyserial>=3.5",
     "shapely>=2.1.2",
+    "slmsuite>=0.4.1",
 ]
 
 [build-system]
@@ -17,3 +20,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/laserlab"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.8",
+]
