@@ -13,28 +13,56 @@ runtime:
 * Otherwise            -> tries :class:`_RealBackend`; on failure the
   factory raises a ``RuntimeError`` explaining how to switch to mock.
 
+Display lifetime notes (important):
+    ``CghDisplayCreateWindow`` opens a fullscreen window. The last frame
+    pushed by ``CghDisplayShowWindow`` remains visible **only while that
+    window handle is alive**. Closing the window (or exiting a ``with``
+    block that calls :meth:`EXULUS.close`) immediately blanks the SLM.
+
+    Prefer computing the phase first, then opening the display and
+    showing the frame in one step, so the user does not stare at a black
+    fullscreen window during CGH calculation.
+
 Example:
     >>> from laserlab.slm import EXULUS
-    >>> with EXULUS() as slm:  # doctest: +SKIP
-    ...     slm.set_phase_stroke(1)
-    ...     slm.set_hflip(True)
-    ...     slm.show_image("target.png", hold_seconds=3.0)
+    >>> slm = EXULUS()  # doctest: +SKIP
+    >>> slm.connect()
+    >>> slm.show_image("target.png", monitor=2)  # keeps window open
+    >>> input("Press Enter to close the SLM window...")
+    >>> slm.close()
 
     On macOS / Linux (no DLLs available), run with
     ``LASERLAB_MOCK=1 python my_script.py``.
 """
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import time
 import ctypes
+import weakref
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
 import cv2
 import numpy as np
 from ctypes import c_ubyte
+
+
+# Track live EXULUS instances so process exit still closes native windows.
+_LIVE_INSTANCES: weakref.WeakSet[Any] = weakref.WeakSet()
+
+
+def _atexit_close_all() -> None:
+    for inst in list(_LIVE_INSTANCES):
+        try:
+            inst.close()
+        except Exception:
+            pass
+
+
+atexit.register(_atexit_close_all)
 
 
 # --------------------------------------------------------------------------- #
@@ -386,33 +414,40 @@ class _RealBackend:
         Raises:
             RuntimeError: If the SDK returns a negative status.
         """
-        flat = np.ascontiguousarray(src, dtype=np.uint8).flatten()
-        src_buf = (c_ubyte * len(flat))(*flat)
-        dst_buf = (c_ubyte * (width * height))()
+        # Prefer zero-copy ctypes views over (c_ubyte * N)(*flat), which
+        # materialises a multi-megabyte Python tuple for a 1920x1080 frame.
+        src_buf = np.ascontiguousarray(src, dtype=np.uint8)
+        if src_buf.ndim != 2:
+            raise ValueError(f"src must be 2D grayscale, got shape {src_buf.shape}")
+        src_ptr = src_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
+        dst_buf = np.empty(height * width, dtype=np.uint8)
+        dst_ptr = dst_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
         rc = self._cgh["resize"](
-            src_buf,
-            src.shape[1],
-            src.shape[0],
-            dst_buf,
+            src_ptr,
+            int(src_buf.shape[1]),
+            int(src_buf.shape[0]),
+            dst_ptr,
             width,
             height,
             mode,
             background,
         )
+        # cgh_lib.h: SUCCESS = 1; negative codes are failures.
         if rc < 0:
             raise RuntimeError(f"CghImageResize -> {rc}")
-        return np.asarray(dst_buf, dtype=np.uint8).reshape(height, width)
+        return dst_buf.reshape(height, width)
 
     def cgh_init(self) -> int:
         """Initialise the CGH library.
 
         Returns:
-            ``0`` on success.
+            SDK status (``SUCCESS == 1`` on success).
 
         Raises:
             RuntimeError: If the SDK returns a negative status.
         """
         rc = self._cgh["init"]()
+        # cgh_lib.h: SUCCESS = 1; CGH_LIB_INIT_ERROR = -5, etc.
         if rc < 0:
             raise RuntimeError(f"CghCoreInit -> {rc}")
         return rc
@@ -451,13 +486,15 @@ class _RealBackend:
             wavelength_m: Laser wavelength in meters.
 
         Returns:
-            SDK return code (``0`` on success).
+            SDK status (``SUCCESS == 1`` on success).
 
         Raises:
             RuntimeError: If the SDK returns a negative status.
         """
+        # Signature from cgh_lib.h:
+        #   cgh_core_update_all(hdl, w_pixel, h_pixel, pix_size_m, distance, wavelength)
         rc = self._cgh["update"](
-            hdl, width, height, pixel_pitch_m, distance_m, wavelength_m
+            hdl, width, height, float(pixel_pitch_m), float(distance_m), float(wavelength_m)
         )
         if rc < 0:
             raise RuntimeError(f"CghCoreUpdateAll -> {rc}")
@@ -469,19 +506,32 @@ class _RealBackend:
         Args:
             hdl: CGH core handle.
             buffer: ``uint8`` 1-D buffer of length ``width * height``.
-                Will be overwritten with the phase pattern.
+                Will be overwritten with the phase pattern. Must remain
+                alive for the duration of the call.
             stroke_m: Effective phase stroke in meters.
 
         Returns:
-            SDK return code (``0`` on success).
+            SDK status (``SUCCESS == 1`` on success).
 
         Raises:
             RuntimeError: If the SDK returns a negative status.
         """
-        buffer = np.ascontiguousarray(buffer, dtype=np.uint8)
-        rc = self._cgh["calc"](hdl, buffer.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte)), stroke_m)
+        # Keep a contiguous view; do not rebuild via (c_ubyte * N)(*flat).
+        # The SDK writes the phase pattern back into the same pointer.
+        cont = np.ascontiguousarray(buffer, dtype=np.uint8)
+        if cont.ndim != 1:
+            cont = cont.reshape(-1)
+        ptr = cont.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
+        rc = self._cgh["calc"](hdl, ptr, float(stroke_m))
         if rc < 0:
             raise RuntimeError(f"CghCoreCalc -> {rc}")
+        # If ascontiguousarray made a copy, push results back.
+        if cont is not buffer and cont.size == np.asarray(buffer).size:
+            np.copyto(
+                np.asarray(buffer).reshape(-1),
+                cont.reshape(-1),
+                casting="unsafe",
+            )
         return rc
 
     def cgh_close(self, hdl: int) -> int:
@@ -545,14 +595,22 @@ class _RealBackend:
                 grayscale or ``(height, width, 3)`` for RGB.
 
         Returns:
-            SDK return code (``0`` on success).
+            SDK status (non-negative on success; ``SUCCESS == 1``).
 
         Raises:
             RuntimeError: If the SDK returns a negative status.
+
+        Notes:
+            The SDK example keeps the window open after
+            ``CghDisplayShowWindow``; the frame stays visible until
+            ``CghDisplayCloseWindow`` is called. A temporary ctypes
+            buffer is fine for a synchronous show, but we still pin a
+            contiguous numpy array for the duration of the call.
         """
-        flat = np.ascontiguousarray(buffer, dtype=np.uint8).flatten()
-        buf = (c_ubyte * len(flat))(*flat)
-        rc = self._disp["show"](hdl, buf)
+        cont = np.ascontiguousarray(buffer, dtype=np.uint8)
+        flat = cont.reshape(-1)
+        ptr = flat.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte))
+        rc = self._disp["show"](hdl, ptr)
         if rc < 0:
             raise RuntimeError(f"CghDisplayShowWindow -> {rc}")
         return rc
@@ -820,6 +878,13 @@ class EXULUS:
         self._dev_hdl: Optional[int] = None
         self._disp_hdl: Optional[int] = None
         self._monitor: Optional[int] = None
+        self._disp_title: str = "EXULUS SLM"
+        self._disp_channels: int = 1
+        # Pin the last frame so the SDK cannot read freed memory if it
+        # keeps an internal pointer after CghDisplayShowWindow returns.
+        self._last_frame: Optional[np.ndarray] = None
+        self._cgh_inited: bool = False
+        _LIVE_INSTANCES.add(self)
 
     # ---- context manager / lifecycle -------------------------------------
     def __enter__(self) -> "EXULUS":
@@ -827,6 +892,10 @@ class EXULUS:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        # Closing the display window blanks the SLM immediately.  If you
+        # need the pattern to remain after the ``with`` block, do not use
+        # the context manager — call :meth:`connect` / :meth:`close`
+        # yourself and keep the process alive.
         self.close()
 
     def connect(self) -> int:
@@ -851,11 +920,10 @@ class EXULUS:
         self._dev_hdl = self._backend.open(serial, self._baud, self._timeout)
         return self._dev_hdl
 
-    def close(self) -> None:
-        """Release the display window and the device handle.
+    def close_display(self) -> None:
+        """Close only the fullscreen display window (blanks the SLM).
 
-        All exceptions from the backend are swallowed so :meth:`close`
-        is safe to call from ``__exit__`` even after a partial failure.
+        Safe to call multiple times. Does not close the serial device.
         """
         if self._disp_hdl is not None:
             try:
@@ -863,12 +931,30 @@ class EXULUS:
             except Exception:
                 pass
             self._disp_hdl = None
+        self._last_frame = None
+
+    def close(self) -> None:
+        """Release the display window and the device handle.
+
+        Closing the display window immediately blanks the SLM — this is
+        SDK behaviour (see ``cgh_display_close_window``), not a bug in
+        the wrapper. Keep the process / object alive while you need the
+        pattern on screen.
+
+        All exceptions from the backend are swallowed so :meth:`close`
+        is safe to call from ``__exit__`` even after a partial failure.
+        """
+        self.close_display()
         if self._dev_hdl is not None:
             try:
                 self._backend.close(self._dev_hdl)
             except Exception:
                 pass
             self._dev_hdl = None
+        try:
+            _LIVE_INSTANCES.discard(self)
+        except Exception:
+            pass
 
     @property
     def serial(self) -> Optional[str]:
@@ -1034,14 +1120,21 @@ class EXULUS:
 
         Args:
             image: ``uint8`` grayscale array of shape
-                ``(self.height, self.width)``. Modified in place.
+                ``(self.height, self.width)``.
 
         Returns:
             The phase pattern (``uint8``, shape ``(height, width)``).
+            This is a new contiguous array; the input is not modified.
 
         Raises:
             ValueError: If ``image`` is not 2-D or its shape does not
                 match the SLM screen.
+
+        Notes:
+            Parameter order follows ``cgh_lib.h``:
+            ``(w_pixel, h_pixel, pix_size_m, distance, wavelength)``.
+            The official Python example swaps the last two floats; this
+            wrapper uses the C header order.
         """
         if image.ndim != 2:
             raise ValueError(f"image must be 2D, got shape {image.shape}")
@@ -1051,9 +1144,14 @@ class EXULUS:
                 f"({self.height}, {self.width})"
             )
 
-        # ``buffer`` is filled in place by the SDK.
-        buffer = np.ascontiguousarray(image, dtype=np.uint8).reshape(-1)
-        self._backend.cgh_init()
+        # ``buffer`` is filled in place by the SDK (same pointer in/out).
+        buffer = np.ascontiguousarray(image, dtype=np.uint8).reshape(-1).copy()
+        # cgh_lib_init is safe to call once; re-init every frame is wasteful
+        # and can contribute to visible black-out time if the display is
+        # already open.
+        if not self._cgh_inited:
+            self._backend.cgh_init()
+            self._cgh_inited = True
         cgh_hdl: int = self._backend.cgh_create()
         try:
             self._backend.cgh_update_all(
@@ -1078,6 +1176,14 @@ class EXULUS:
     ) -> int:
         """Create the SLM display window on a monitor.
 
+        The SDK opens a **fullscreen** window. Until the first
+        :meth:`show_phase` call the window content is typically black —
+        that is the main source of the brief black flash if you open the
+        display before CGH calculation finishes.
+
+        If a display window is already open on the same monitor, the
+        existing handle is reused (no second fullscreen window).
+
         Args:
             monitor: 1-based monitor index reported by the SDK.
             title: Window title.
@@ -1090,18 +1196,39 @@ class EXULUS:
             RuntimeError: If no monitors are detected or the SDK fails.
             ValueError: If ``monitor`` is out of range.
         """
+        if (
+            self._disp_hdl is not None
+            and self._monitor == monitor
+            and self._disp_channels == channels
+        ):
+            return self._disp_hdl
+
+        # Recreate if monitor/channels changed.
+        if self._disp_hdl is not None:
+            self.close_display()
+
         count = self._backend.display_get_monitor_count()
         if count <= 0:
             raise RuntimeError("No monitors detected for SLM display")
         if not 1 <= monitor <= count:
             raise ValueError(f"monitor {monitor} out of range 1..{count}")
         self._monitor = monitor
+        self._disp_title = title
+        self._disp_channels = channels
         hdl = self._backend.display_create_window(
             monitor, self.width, self.height, title
         )
         if hdl < 0:
             raise RuntimeError(f"CghDisplayCreateWindow -> {hdl}")
-        self._backend.display_set_window_info(hdl, self.width, self.height, channels)
+        rc = self._backend.display_set_window_info(
+            hdl, self.width, self.height, channels
+        )
+        if rc is not None and rc < 0:
+            try:
+                self._backend.display_close_window(hdl)
+            except Exception:
+                pass
+            raise RuntimeError(f"CghDisplaySetWindowInfo -> {rc}")
         self._disp_hdl = hdl
         return hdl
 
@@ -1109,6 +1236,9 @@ class EXULUS:
         """Display a precomputed phase pattern on the SLM.
 
         Opens the display window automatically on the first call.
+        The frame remains visible until :meth:`close_display` /
+        :meth:`close` is called (matching the SDK example, which sleeps
+        after ``CghDisplayShowWindow`` and only then closes the window).
 
         Args:
             phase: ``uint8`` ndarray of shape
@@ -1123,8 +1253,11 @@ class EXULUS:
                 f"phase must be uint8 ({self.height}, {self.width}); "
                 f"got {phase.shape} {phase.dtype}"
             )
+        # Pin a private copy for the lifetime of the displayed frame.
+        frame = np.ascontiguousarray(phase, dtype=np.uint8)
+        self._last_frame = frame
         disp_hdl = self._require_display()
-        self._backend.display_show(disp_hdl, phase)
+        self._backend.display_show(disp_hdl, frame)
 
     def show_array(
         self,
@@ -1132,8 +1265,14 @@ class EXULUS:
         *,
         resize_mode: int = RESIZE_FILL,
         background: int = 0,
+        monitor: Optional[int] = None,
+        title: str = "EXULUS SLM",
+        hold_seconds: float = 0.0,
     ) -> np.ndarray:
         """Compute the CGH from a numpy image and display it.
+
+        CGH is computed **before** the fullscreen window is created so
+        the SLM does not sit on a black frame during calculation.
 
         Args:
             image: Grayscale (``H x W``) or BGR (``H x W x 3``) image.
@@ -1141,6 +1280,12 @@ class EXULUS:
                 :attr:`RESIZE_FILL`, :attr:`RESIZE_STRETCH`. The values
                 match the SDK's ``enum resize_mode``.
             background: Padding colour for fitting modes.
+            monitor: Optional 1-based monitor index. ``None`` reuses the
+                previously selected monitor (or ``1``).
+            title: Window title if the display must be opened.
+            hold_seconds: Optional sleep after showing the frame. This
+                only delays the return; the pattern stays up until the
+                display window is closed.
 
         Returns:
             The computed phase pattern.
@@ -1151,8 +1296,15 @@ class EXULUS:
             image = self._backend.cgh_image_resize(
                 image, self.width, self.height, resize_mode, background
             )
+        # Compute first — avoid black fullscreen during CGH.
         phase = self.compute_cgh(image)
+        if self._disp_hdl is None:
+            self.open_display(monitor=monitor or self._monitor or 1, title=title)
+        elif monitor is not None and monitor != self._monitor:
+            self.open_display(monitor=monitor, title=title)
         self.show_phase(phase)
+        if hold_seconds > 0:
+            time.sleep(hold_seconds)
         return phase
 
     def show_image(
@@ -1167,7 +1319,17 @@ class EXULUS:
     ) -> np.ndarray:
         """End-to-end: read image file -> compute CGH -> display on SLM.
 
-        Opens the display window on the first call.
+        Order of operations (important for avoiding black flash):
+
+        1. Load + resize the image (no display window yet).
+        2. Compute the CGH phase pattern.
+        3. Open the fullscreen display window if needed.
+        4. Push the phase with ``CghDisplayShowWindow``.
+
+        The pattern remains on the SLM until :meth:`close_display` or
+        :meth:`close` is called. ``hold_seconds`` only blocks the caller;
+        it does **not** keep the window open by itself after
+        :meth:`close`.
 
         Args:
             path: Image file readable by OpenCV.
@@ -1181,20 +1343,21 @@ class EXULUS:
                 the index of the physical SLM panel (otherwise the main
                 screen goes black).
             title: Window title for :meth:`open_display`.
-            hold_seconds: How long to keep the display window alive
-                after pushing the frame, in seconds. The previous
-                behaviour returned immediately (image disappeared as
-                soon as the caller exited its ``with`` block); pass a
-                positive value to keep the SLM showing the pattern.
-                ``0`` (default) preserves the legacy no-wait semantics.
+            hold_seconds: How long to block after pushing the frame.
+                Useful inside a ``with`` block so the pattern is visible
+                before ``__exit__`` closes the window. ``0`` returns
+                immediately; the window still stays open until
+                :meth:`close`.
 
         Returns:
             The computed phase pattern.
         """
         gray = self.load_image(path, resize_mode=resize_mode, background=background)
-        if self._disp_hdl is None:
-            self.open_display(monitor=monitor, title=title)
+        # Compute CGH before opening the fullscreen window to avoid a
+        # multi-second black frame while the SDK calculates.
         phase = self.compute_cgh(gray)
+        if self._disp_hdl is None or self._monitor != monitor:
+            self.open_display(monitor=monitor, title=title)
         self.show_phase(phase)
         if hold_seconds > 0:
             time.sleep(hold_seconds)
@@ -1226,5 +1389,9 @@ class EXULUS:
         """
         disp_hdl = self._disp_hdl
         if disp_hdl is None:
-            return self.open_display(monitor=self._monitor or 1)
+            return self.open_display(
+                monitor=self._monitor or 1,
+                title=self._disp_title,
+                channels=self._disp_channels,
+            )
         return disp_hdl

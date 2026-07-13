@@ -3,3 +3,4 @@ from .stage import ProScanStage
 from .utils import print_ports
 from .laser import LaserControl
 from .slm import EXULUS
+from .camera import NikonDSFi3Camera
