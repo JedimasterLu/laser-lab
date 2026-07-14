@@ -150,7 +150,7 @@ def main():
         if rectangle_method == "1":
             print("Use the joystick to move to the first corner, then press 'a'.")
             print("Move to the opposite diagonal corner and press 'a' again.")
-                        
+                
             diagonal_points = []
             while len(diagonal_points) < 2:
                 new_input = input("Enter command ('a' to add point): ").strip().lower()
@@ -165,22 +165,28 @@ def main():
                 print("Rectangle generated and saved to 'roi_vertices.npy' successfully.")
             except ValueError as e:
                 print(f"Error: {e}")
-                return 
+            return 
         else:
-            print("Use the joystick to move to the reference corner, then press 'a'.")   
-            point = []
-            new_input = input("Enter command ('a' to add point): ").strip().lower()
-            if new_input == "a":
-                point.append(stage.position)
-                print(f"Point added: {stage.position}") 
+            print("Use the joystick to move to the reference corner, then press 'a'.")    
+            reference_point = None
+            while reference_point is None:
+                new_input = input("Enter command ('a' to add point): ").strip().lower()
+                if new_input == "a":
+                    reference_point = stage.position
+                    print(f"Reference corner added: {reference_point}")
+                else:
+                    print("Invalid command. Please enter 'a'.")
+            # ----------------------------------------------------------------------
+                    
             side_length_um = float(input("Enter the side length of the square in microns: "))
             side_length_steps = side_length_um * stage.steps_per_micron
             vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
-            
-            vertices = generate_rectangle_vertices_with_point_and_diagonal_length(stage.position, side_length_steps, vert_rel_position)
+        
+            # Replaced `stage.position` with the `reference_point` we just captured
+            vertices = generate_rectangle_vertices_with_point_and_diagonal_length(reference_point, side_length_steps, vert_rel_position)
             np.save("roi_vertices.npy", vertices)
-            print("Square generated and saved to 'roi_vertices.npy' successfully.")
-            
+            print("Square generated and saved to 'roi_vertices.npy' successfully.")    
+        
     polygon = Polygon(vertices)
     if (not polygon.is_valid) or polygon.area <= 0:
         raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
