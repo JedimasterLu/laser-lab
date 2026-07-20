@@ -188,6 +188,45 @@ def generate_angled_serpentine_path(bounds: tuple, step: float, angle_deg: float
             
     return np.array(path)
 
+def visualize_angled_path(bounds: tuple, scan_points: np.ndarray, angle_deg: float):
+    """
+    Visualizes the generated serpentine path within the bounding box.
+    Inverts the Y-axis to match camera/screen coordinates.
+    """
+    min_x, min_y, max_x, max_y = bounds
+    
+    plt.figure(figsize=(8, 6))
+    
+    # 1. Draw the bounding box (ROI)
+    box_x = [min_x, max_x, max_x, min_x, min_x]
+    box_y = [min_y, min_y, max_y, max_y, min_y]
+    plt.plot(box_x, box_y, 'r--', label="ROI Boundary", linewidth=2)
+    
+    # 2. Draw the serpentine path
+    plt.plot(scan_points[:, 0], scan_points[:, 1], 'b-', alpha=0.7, label=f"Laser Path ({angle_deg}°)")
+    
+    # 3. Highlight individual intersection points
+    plt.scatter(scan_points[:, 0], scan_points[:, 1], c='blue', s=15, alpha=0.5)
+    
+    # 4. Highlight Start and End points explicitly for safety verification
+    plt.scatter(scan_points[0, 0], scan_points[0, 1], c='green', s=150, marker='*', label='Start')
+    plt.scatter(scan_points[-1, 0], scan_points[-1, 1], c='red', s=150, marker='X', label='End')
+    
+    # 5. Invert Y-Axis to match the CV camera screen coordinates
+    plt.gca().invert_yaxis()
+    
+    # Formatting
+    plt.title(f"Angled Serpentine Path Visualization ({angle_deg}°)")
+    plt.xlabel("X (Stage Steps)")
+    plt.ylabel("Y (Stage Steps) - Inverted for Screen")
+    plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.axis('equal') # Keep the aspect ratio square so angles visually look correct
+    plt.tight_layout()
+    
+    print("Close the plot window to continue hardware execution...")
+    plt.show()
+    
 def main_pipeline():
     print("=== PUF Laser Automation Pipeline ===")
     
@@ -354,6 +393,10 @@ def main_pipeline():
         # Call the newly updated angled generation function
         bounds = (min_x, min_y, max_x, max_y)
         scan_points = generate_angled_serpentine_path(bounds, step_steps, phase["angle_deg"])
+        
+        # --- NEW: VISUALIZE THE PATH ---
+        visualize_angled_path(bounds, scan_points, phase["angle_deg"])
+        # -------------------------------
         
         # 4b. Execute iterations for this phase
         for i in range(phase["iterations"]):
