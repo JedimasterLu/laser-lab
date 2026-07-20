@@ -5,7 +5,7 @@ import os
 import json
 import time
 import cv2
-import laserlab
+import src # check this
 
 def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
     """
