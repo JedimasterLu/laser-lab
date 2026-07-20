@@ -110,6 +110,84 @@ def generate_rectangle_serpentine_path_smooth(bounds: tuple, step: float, direct
     else:
         raise ValueError("Direction must be either 'horizontal' or 'vertical'.")
 
+def generate_angled_serpentine_path(bounds: tuple, step: float, angle_deg: float) -> np.ndarray:
+    """
+    Generate smooth serpentine points within a rectangular bounds at any angle.
+    
+    Args:
+        bounds (tuple): (min_x, min_y, max_x, max_y)
+        step (float): The distance between each scan line.
+        angle_deg (float): Angle of the scan lines in degrees from the horizontal.
+                           (e.g., 0 = horizontal, 90 = vertical, 45 = diagonal).
+    """
+    min_x, min_y, max_x, max_y = bounds
+    theta = np.radians(angle_deg)
+    
+    # Unit vector normal (perpendicular) to the scan lines
+    nx = -np.sin(theta)
+    ny = np.cos(theta)
+    
+    # 4 corners of the bounding box
+    corners = np.array([
+        [min_x, min_y],
+        [max_x, min_y],
+        [max_x, max_y],
+        [min_x, max_y]
+    ])
+    
+    # Project the corners onto the normal vector to find the range of 'd'
+    # 'd' represents the distance from the origin to each parallel scan line
+    projections = corners[:, 0] * nx + corners[:, 1] * ny
+    d_min, d_max = np.min(projections), np.max(projections)
+    
+    # Generate the steps along the normal vector
+    d_values = np.arange(d_min, d_max + 1e-9, step)
+    
+    path = []
+    left_to_right = True
+    
+    for d in d_values:
+        intersections = []
+        
+        # 1. Find intersections with Left & Right edges (x = min_x, x = max_x)
+        if abs(ny) > 1e-9: # Avoid division by zero if lines are perfectly vertical
+            for x_edge in (min_x, max_x):
+                y_edge = (d - nx * x_edge) / ny
+                # Check if the intersection happens within the physical box
+                if min_y - 1e-9 <= y_edge <= max_y + 1e-9:
+                    intersections.append((x_edge, np.clip(y_edge, min_y, max_y)))
+                    
+        # 2. Find intersections with Top & Bottom edges (y = min_y, y = max_y)
+        if abs(nx) > 1e-9: # Avoid division by zero if lines are perfectly horizontal
+            for y_edge in (min_y, max_y):
+                x_edge = (d - ny * y_edge) / nx
+                if min_x - 1e-9 <= x_edge <= max_x + 1e-9:
+                    intersections.append((np.clip(x_edge, min_x, max_x), y_edge))
+        
+        # Filter down to unique points (handles cases where a line perfectly clips a corner)
+        unique_pts = []
+        for pt in intersections:
+            if not any(np.allclose(pt, u_pt, atol=1e-7) for u_pt in unique_pts):
+                unique_pts.append(pt)
+        
+        # If we successfully found where the line enters and exits the ROI
+        if len(unique_pts) >= 2:
+            # Sort the points along the direction of the scan line
+            dx, dy = np.cos(theta), np.sin(theta)
+            unique_pts.sort(key=lambda p: p[0]*dx + p[1]*dy)
+            
+            pt1, pt2 = unique_pts[0], unique_pts[-1]
+            
+            # Alternate directions for the serpentine sweep
+            if left_to_right:
+                path.extend([pt1, pt2])
+            else:
+                path.extend([pt2, pt1])
+                
+            left_to_right = not left_to_right
+            
+    return np.array(path)
+
 def main_pipeline():
     print("=== PUF Laser Automation Pipeline ===")
     
@@ -171,6 +249,7 @@ def main_pipeline():
                 
         side_length_um = float(input("Enter the side length of the square in microns: "))
         side_length_steps = side_length_um * stage.steps_per_micron # Assuming steps_per_micron is accessible
+        print("Note that the vertical axis is inverted - what appears to be the top right is actually bottom right")
         vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
         
         vertices = generate_rectangle_vertices_with_point_and_diagonal_length(reference_point, side_length_steps, vert_rel_position)
@@ -200,27 +279,25 @@ def main_pipeline():
     
     while True:
         print(f"\n--- Phase {phase_count} ---")
-        orientation = input("Scan direction ('h' for horizontal, 'v' for vertical): ").strip().lower()
-        orientation_str = "horizontal" if orientation == 'h' else "vertical"
+        
+        # Get the angle instead of H/V
+        angle_input = input("Scan angle in degrees (e.g., 0 for horizontal, 90 for vertical, 45 for diagonal): ").strip()
+        angle_deg = float(angle_input) if angle_input else 0.0
         
         step_um = float(input("Enter the step size (distance between lines) in microns: "))
-        sweep_time = float(input("Enter the desired sweep time per line in seconds: "))
-        iterations = int(input(f"How many times should the {orientation_str} scan run? "))
+        sweep_time = float(input("Enter the desired sweep time per longest line in seconds: "))
+        iterations = int(input(f"How many times should the {angle_deg}° scan run? "))
         
         # Calculate Required Velocity for this specific phase
-        # If horizontal, we traverse the X width. If vertical, we traverse the Y height.
-        # (Assuming you have stage.steps_per_micron available)
-        if orientation_str == "horizontal":
-            sweep_distance_um = (max_x - min_x) / stage.steps_per_micron
-        else:
-            sweep_distance_um = (max_y - min_y) / stage.steps_per_micron
+        # For an angled scan, we use the maximum diagonal distance to ensure safe, consistent velocity
+        diag_distance_um = np.sqrt((max_x - min_x)**2 + (max_y - min_y)**2) / stage.steps_per_micron
             
-        velocity_um_s = sweep_distance_um / sweep_time
+        velocity_um_s = diag_distance_um / sweep_time
 
         # Append to our master dictionary
         phase_config = {
             "phase": phase_count,
-            "orientation": orientation_str,
+            "angle_deg": angle_deg,
             "step_um": step_um,
             "sweep_time_s": sweep_time,
             "velocity_um_s": velocity_um_s,
@@ -231,7 +308,9 @@ def main_pipeline():
         more = input("Add another phase to this routine? (y/n): ").strip().lower()
         if more != 'y':
             break
-        phase_count += 1
+        else:
+            phase_count += 1
+            continue
 
     # Save dictionary as a JSON file so it is human-readable later
     with open("routine_config.json", "w") as f:
@@ -267,13 +346,14 @@ def main_pipeline():
     total_runs = sum(phase["iterations"] for phase in routine_dictionary)
 
     for phase in routine_dictionary:
-        print(f"\n================ STARTING PHASE {phase['phase']} ({phase['orientation'].upper()}) ================")
+        print(f"\n================ STARTING PHASE {phase['phase']} ({phase['angle_deg']}° ANGLE) ================")
         
         # 4a. Generate the path just once for this specific phase
         step_steps = phase["step_um"] * stage.steps_per_micron
         
-        # Assuming your path generation function takes 'direction' as an argument now
-        scan_points = generate_serpentine_path(roi_polygon, step_steps, direction=phase["orientation"])
+        # Call the newly updated angled generation function
+        bounds = (min_x, min_y, max_x, max_y)
+        scan_points = generate_angled_serpentine_path(bounds, step_steps, phase["angle_deg"])
         
         # 4b. Execute iterations for this phase
         for i in range(phase["iterations"]):
@@ -301,7 +381,7 @@ def main_pipeline():
             #input("SAFETY: Turn ON the physical laser switch. Press Enter when ready...")
             
             try:
-                print(f"Executing {phase['orientation']} scan at {phase['velocity_um_s']:.2f} um/s...")
+                print(f"Executing {phase['angle_deg']}° scan at {phase['velocity_um_s']:.2f} um/s...")
                 shutter.open()
                 stage.scan(scan_points) 
             finally:
