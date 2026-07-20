@@ -14,3 +14,7 @@ wheels/
 assets/
 
 docs/
+
+*ipynb
+
+temp/
