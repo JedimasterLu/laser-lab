@@ -5,7 +5,7 @@ import os
 import json
 import time
 import cv2
-import src # check this
+import laserlab
 
 def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
     """
@@ -234,10 +234,10 @@ def main_pipeline():
     # 0. INITIALIZE HARDWARE 
     # ---------------------------------------------------------
     stage_port = "COM3"  # Replace with actual COM port
-    shutter_port = "COM4" # Replace with actual COM port
+    shutter_port = "COM6" # Replace with actual COM port
     
-    # stage = ProScanStage(port=stage_port)
-    # shutter = SC30Shutter(port=shutter_port)
+    stage = laserlab.ProScanStage(port=stage_port)
+    shutter = laserlab.SC30Shutter(port=shutter_port)
     camera = None
 
     # ---------------------------------------------------------
@@ -367,7 +367,7 @@ def main_pipeline():
         print("Initializing Nikon camera...")
         dll_path = r"C:\Program Files\Nikon\DSCam\DSCam.dll" 
         try:
-            camera = NikonDSFi3Camera(dll_path=dll_path)
+            camera = laserlab.NikonDSFi3Camera(dll_path=dll_path)
             camera.set_exposure(0.1) # 100ms default
             print("Camera successfully linked.")
         except Exception as e:
@@ -437,6 +437,7 @@ def main_pipeline():
             print("Moving to center for Post-Scan Image...")
             stage.move_to(center_x, center_y)
             time.sleep(0.5)
+            
             
             if camera:
                 img = camera.get_image()
