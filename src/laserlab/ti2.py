@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import collections.abc as cabc
 import ctypes as ct
+import dataclasses
 import os
 import time
 from typing import Any
@@ -69,6 +70,17 @@ _DEFAULT_DLL = r"C:\Program Files\Nikon\Ti2-SDK\Bin\Ti2_Mic_Driver.dll"
 
 class Ti2Error(RuntimeError):
     pass
+
+
+@dataclasses.dataclass
+class AutofocusCameraResult:
+    """Sharpness measurements and selected position from a camera autofocus scan."""
+
+    sharpness: list[float]
+    z_positions_um: list[float]
+    best_index: int
+    best_score: float
+    best_z_um: float
 
 
 def _check(code: int, fn: str) -> None:
@@ -527,30 +539,32 @@ class NikonTi2:
     def autofocus(
         self,
         io_channel: int = 1,
-        z_relative_dev: int = 500000,
+        z_relative_dev: int | None = None,
         speed: int = 9,
         scan_duration_s: float = 1.0,
         live_callback: cabc.Callable[[], Any] | None = None,
         best_index: int | None = 1,
         move_to_best: bool = True,
+        scan_half_range_um: float = 50.0,
+        scan_steps: int = 40,
+        stop_on_sharpness_drop: bool = False,
     ) -> bool:
         """Run Ti2 SDK contrast AF / Auto Focus FLUO sequence.
 
         Follows dedicated command sequence from Nikon Ti2 SDK:
           1. Configure I/O port trigger edge (SET_IO_CONTROL_BOX / SET_IO_CONTROLBOX_TRIGGER_EDGE).
-          2. Arm RUN_AF on specified exposure I/O channel.
-          3. Reset AF timestamp and start RUN_AF_ZPRINT search.
-          4. Wait for camera exposure triggers during live_callback / scan_duration_s.
-          5. STOP_AF_ZPRIN.
-          6. Move to target focus index (MOVE_AF_ZPRINT_POS) if requested.
-          7. STOP_AF.
+          2. Move to the lower end of the physical scan range.
+          3. Arm RUN_AF on specified exposure I/O channel.
+          4. Reset AF timestamp and start RUN_AF_ZPRINT search.
+          5. Wait for camera exposure triggers during live_callback / scan_duration_s.
+          6. STOP_AF_ZPRIN.
+          7. Move to target focus index (MOVE_AF_ZPRINT_POS) if requested.
+          8. STOP_AF.
 
         Parameters
         ----------
         io_channel : int
             Camera exposure signal I/O port (1-8 control box).
-        z_relative_dev : int
-            Z search range in linear scale device units (default 500000).
         speed : int
             AF Z-drive speed (default 9).
         scan_duration_s : float
@@ -562,33 +576,167 @@ class NikonTi2:
             drives stage to that position.
         move_to_best : bool
             Whether to call MOVE_AF_ZPRINT_POS after stopping Z-print.
+        scan_half_range_um : float
+            Half-width of the physical Z scan range around the current position.
+            The default scans from current Z - 50 um to current Z + 50 um.
+        scan_steps : int
+            Number of frames and Z positions in a software scan.
+        stop_on_sharpness_drop : bool
+            Stop a software scan after two consecutive decreases in the numeric
+            value returned by ``live_callback``.
+        z_relative_dev : int, optional
+            Retained for API compatibility; the physical scan range controls travel.
 
         Returns
         -------
         bool
             True if the AF sequence completed without error.
         """
+        if scan_half_range_um <= 0:
+            raise ValueError("scan_half_range_um must be greater than zero")
+        if scan_steps < 2:
+            raise ValueError("scan_steps must be at least 2")
+
+        current_z = self.get_z()
+        scan_start_um = max(self.z_min_um, current_z - float(scan_half_range_um))
+        scan_end_um = min(self.z_max_um, current_z + float(scan_half_range_um))
+        if scan_start_um >= scan_end_um:
+            raise ValueError("Autofocus scan range does not contain positive Z travel")
+
+        # Software scoring needs each image to correspond to a known Z position.
+        # The SDK Z-print command is asynchronous, so use explicit stage steps
+        # when a live callback is supplied instead of racing that command.
+        if live_callback is not None:
+            previous_score: float | None = None
+            consecutive_drops = 0
+            for step_index in range(scan_steps):
+                fraction = step_index / (scan_steps - 1)
+                position_um = scan_start_um + (scan_end_um - scan_start_um) * fraction
+                self.set_z(position_um, speed=1)
+                callback_result = live_callback()
+                if stop_on_sharpness_drop and isinstance(callback_result, (int, float)):
+                    score = float(callback_result)
+                    if previous_score is not None and score < previous_score:
+                        consecutive_drops += 1
+                    else:
+                        consecutive_drops = 0
+                    previous_score = score
+                    if consecutive_drops >= 2:
+                        break
+                if scan_duration_s > 0:
+                    time.sleep(float(scan_duration_s) / scan_steps)
+            return True
+
+        scan_start_dev = self._to_dev(MASK_Z, scan_start_um)
+        scan_end_dev = self._to_dev(MASK_Z, scan_end_um)
+        z_relative_dev = abs(scan_end_dev - scan_start_dev)
+        if z_relative_dev <= 0:
+            raise ValueError("Autofocus scan range is smaller than one Z device unit")
+
         try:
-            self.af_setup_io()
+            self.set_z(scan_start_um, speed=1)
             self.af_start(
                 io_channel=io_channel,
                 z_relative_dev=z_relative_dev,
                 speed=speed,
             )
-
-            if live_callback is not None:
-                live_callback()
-            elif scan_duration_s > 0:
+            if scan_duration_s > 0:
                 time.sleep(float(scan_duration_s))
-
             self.af_stop_zprint()
-
             if move_to_best and best_index is not None:
                 self.af_move_to_index(best_index)
-
             return True
         finally:
             try:
                 self.af_stop()
             except Exception:
                 pass
+
+    def autofocus_with_camera(
+        self,
+        camera: Any,
+        sharpness_function: cabc.Callable[[Any], float],
+        *,
+        speed: int = 1,
+        scan_duration_s: float = 1.0,
+        scan_half_range_um: float = 50.0,
+        scan_steps: int = 40,
+        stop_on_sharpness_drop: bool = False,
+        move_to_best: bool = True,
+    ) -> AutofocusCameraResult:
+        """Run a software autofocus scan using a camera-like object.
+
+        ``camera`` must provide ``get_image()``. ``sharpness_function`` receives
+        each image and returns its numeric sharpness score.
+        """
+        sharpness: list[float] = []
+        z_positions_um: list[float] = []
+
+        def capture_and_score() -> float:
+            image = camera.get_image()
+            score = float(sharpness_function(image))
+            sharpness.append(score)
+            z_positions_um.append(self.get_z())
+            return score
+
+        self.autofocus(
+            speed=speed,
+            scan_duration_s=scan_duration_s,
+            scan_half_range_um=scan_half_range_um,
+            scan_steps=scan_steps,
+            stop_on_sharpness_drop=stop_on_sharpness_drop,
+            live_callback=capture_and_score,
+            move_to_best=False,
+        )
+
+        best_index = max(range(len(sharpness)), key=sharpness.__getitem__)
+        best_z_um = z_positions_um[best_index]
+        if move_to_best:
+            self.set_z(best_z_um, speed=1)
+        return AutofocusCameraResult(
+            sharpness=sharpness,
+            z_positions_um=z_positions_um,
+            best_index=best_index,
+            best_score=sharpness[best_index],
+            best_z_um=best_z_um,
+        )
+
+    def quick_autofocus_with_camera(
+        self,
+        camera: Any,
+        sharpness_function: cabc.Callable[[Any], float],
+        *,
+        speed: int = 1,
+        scan_duration_s: float = 1.0,
+        coarse_half_range_um: float = 100.0,
+        coarse_steps: int = 10,
+        fine_half_range_um: float = 20.0,
+        fine_steps: int = 20,
+        stop_on_sharpness_drop: bool = True,
+    ) -> tuple[AutofocusCameraResult, AutofocusCameraResult]:
+        """Run coarse and fine camera autofocus scans.
+
+        The coarse scan uses the current Z position as its center. The fine
+        scan then uses the coarse best position as its center.
+        """
+        coarse_result = self.autofocus_with_camera(
+            camera,
+            sharpness_function,
+            speed=speed,
+            scan_duration_s=scan_duration_s,
+            scan_half_range_um=coarse_half_range_um,
+            scan_steps=coarse_steps,
+            stop_on_sharpness_drop=False,
+            move_to_best=True,
+        )
+        fine_result = self.autofocus_with_camera(
+            camera,
+            sharpness_function,
+            speed=speed,
+            scan_duration_s=scan_duration_s,
+            scan_half_range_um=fine_half_range_um,
+            scan_steps=fine_steps,
+            stop_on_sharpness_drop=stop_on_sharpness_drop,
+            move_to_best=True,
+        )
+        return coarse_result, fine_result
