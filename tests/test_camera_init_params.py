@@ -72,8 +72,23 @@ def test_apply_startup_features_order_and_optional_skip() -> None:
     assert calls == [("exposure", 0.1)]
 
 
+def test_context_manager_protocol() -> None:
+    closed = []
+
+    class DummyCam:
+        def close(self):
+            closed.append(True)
+
+    dummy = DummyCam()
+    entered = NikonDSFi3Camera.__enter__(dummy)  # type: ignore
+    assert entered is dummy
+    NikonDSFi3Camera.__exit__(dummy, None, None, None)  # type: ignore
+    assert closed == [True]
+
+
 if __name__ == "__main__":
     test_exposure_s_to_usec_rounding_and_clamp()
     test_constructor_accepts_camera_feature_kwargs()
     test_apply_startup_features_order_and_optional_skip()
+    test_context_manager_protocol()
     print("ok")

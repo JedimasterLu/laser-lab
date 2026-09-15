@@ -482,6 +482,12 @@ class NikonDSFi3Camera(Camera):
     def info(verbose: bool = True):
         return []
 
+    def __enter__(self) -> NikonDSFi3Camera:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
     def close(self):
         try:
             self._stop_transfer_hw()
