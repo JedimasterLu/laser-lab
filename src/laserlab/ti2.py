@@ -1,12 +1,15 @@
 """Nikon Ti2 control via Ti2_Mic_Driver.dll (Windows only).
 
-Z is in micrometres. Autofocus uses PFS (Perfect Focus), not contrast AF.
+Z is in micrometres. Autofocus uses SDK contrast AF / Auto Focus FLUO (RUN_AF family).
+PFS functions are kept as independent helpers (pfs_on / pfs_off / pfs_wait).
 """
 
 from __future__ import annotations
 
 import ctypes as ct
 import os
+import time
+from typing import Any, Callable
 
 LX_OK = 0
 _ERR = {
@@ -43,6 +46,18 @@ MASK_EPI_SW = 0x10000000000
 PFS_ON_FOCUS = 1 << 8
 CMD_PFS_SEARCH = "RUN_PFS_SEARCH_OFFSET"
 CMD_WAIT_PFS = "WaitForPFS"
+
+# Dedicated contrast autofocus commands (Auto Focus FLUO in Ti2 workflow)
+CMD_RUN_AF = "RUN_AF"
+CMD_STOP_AF = "STOP_AF"
+CMD_STOP_AF_ZPRIN = "STOP_AF_ZPRIN"
+CMD_RUN_AF_ZPRINT = "RUN_AF_ZPRINT"
+CMD_GET_AF_ZPRINT = "GET_AF_ZPRINT"
+CMD_GET_AF_ZPOSITION = "GET_AF_ZPOSITION"
+CMD_MOVE_AF_ZPRINT_POS = "MOVE_AF_ZPRINT_POS"
+CMD_RESET_AF_TIMESTAMP = "RESET_AF_TIMESTAMP"
+CMD_SET_IO_CONTROL_BOX = "SET_IO_CONTROL_BOX"
+CMD_SET_IO_CONTROLBOX_TRIGGER_EDGE = "SET_IO_CONTROLBOX_TRIGGER_EDGE"
 
 _DEFAULT_DLL = r"C:\Program Files\Nikon\Ti2-SDK\Bin\Ti2_Mic_Driver.dll"
 
@@ -140,6 +155,16 @@ class MIC_Data(ct.Structure):
 
 class MIC_Command(ct.Structure):
     _fields_ = [("wszCommandString", ct.c_wchar * 256), ("pCommandData", ct.c_void_p)]
+
+
+class MIC_AFZBuffer(ct.Structure):
+    """AF Z position history buffer matching SDK new_mic_sdk2_DedicatedCommand.h."""
+
+    _fields_ = [
+        ("DataCount", ct.c_long),
+        ("Time", ct.c_long * 6000),       # usec zero-based, -1 = invalid
+        ("ZPosition", ct.c_long * 6000),  # ZPos, -999000 = invalid
+    ]
 
 
 def _resolve_dll(dll_path: str | None) -> str:
@@ -365,7 +390,7 @@ class NikonTi2:
             raise ValueError("filter wheel must be 1 or 2")
         return int(getattr(self._set(data), field))
 
-    # --- PFS autofocus ---
+    # --- PFS (Perfect Focus System) helpers ---
 
     def pfs_on(self) -> None:
         data = MIC_Data()
@@ -392,10 +417,152 @@ class NikonTi2:
         self._cmd(CMD_WAIT_PFS, ct.c_int32(int(timeout_ms)), out)
         return int(out[0]), int(out[1])
 
-    def autofocus(self, timeout_ms: int = 10000, search_offset: bool = False) -> bool:
-        """Enable PFS and wait. Returns True if on-focus (status bit 8)."""
-        self.pfs_on()
-        if search_offset:
-            self.pfs_search_offset()
-        _, status = self.pfs_wait(timeout_ms)
-        return bool(status & PFS_ON_FOCUS)
+    # --- Contrast Autofocus / Auto Focus FLUO (RUN_AF family) ---
+
+    def af_setup_io(self, io_mask: int = 0x00, falling_edge_mask: int = 0x100) -> None:
+        """Configure Control Box I/O ports and trigger edges for AF.
+
+        Defaults match SDK Example8 (Run_Example8):
+          - IO1~IO8 as Input (0x00)
+          - IO1 trigger on falling edge (0x100 = bit8)
+        """
+        val_io = (ct.c_uint32 * 1)(int(io_mask) & 0xFF)
+        self._cmd(CMD_SET_IO_CONTROL_BOX, val_io)
+
+        val_edge = (ct.c_uint32 * 1)(int(falling_edge_mask) & 0xFFFF)
+        self._cmd(CMD_SET_IO_CONTROLBOX_TRIGGER_EDGE, val_edge)
+
+    def af_start(
+        self,
+        io_channel: int = 1,
+        z_relative_dev: int = 500000,
+        speed: int = 9,
+    ) -> None:
+        """Arm contrast autofocus and start Z-print motion.
+
+        Parameters
+        ----------
+        io_channel : int
+            1-8 for ControlBox I/O, 9-25 for ExtensionBox.
+        z_relative_dev : int
+            Relative Z travel in device linear units (e.g. 500000 as in sample).
+        speed : int
+            Z scan speed (1-19, sample uses 9).
+        """
+        io_arg = (ct.c_int32 * 1)(int(io_channel))
+        self._cmd(CMD_RUN_AF, io_arg)
+        self._cmd(CMD_RESET_AF_TIMESTAMP, None)
+
+        zprint_arg = (ct.c_int32 * 2)(int(z_relative_dev), int(speed))
+        self._cmd(CMD_RUN_AF_ZPRINT, zprint_arg)
+
+    def af_stop_zprint(self) -> None:
+        """Stop active AF Z-print motion."""
+        self._cmd(CMD_STOP_AF_ZPRIN, None)
+
+    def af_stop(self) -> None:
+        """Terminate AF mode on the microscope controller."""
+        self._cmd(CMD_STOP_AF, None)
+
+    def af_get_z_positions(self) -> list[tuple[int, int]]:
+        """Retrieve recorded Z positions and timestamps from AF buffer.
+
+        Returns list of (time_usec, z_position_dev).
+        """
+        buf = MIC_AFZBuffer()
+        self._cmd(CMD_GET_AF_ZPOSITION, None, out=ct.byref(buf))
+        records = []
+        for i in range(max(0, min(buf.DataCount, 6000))):
+            t = int(buf.Time[i])
+            z = int(buf.ZPosition[i])
+            if t >= 0 and z != -999000:
+                records.append((t, z))
+        return records
+
+    def af_get_zprint_pos(self, index: int) -> tuple[int, int]:
+        """Read linear-scale position for AF slice index (1-5000).
+
+        Returns (index, pos_dev).
+        """
+        if not 1 <= int(index) <= 5000:
+            raise ValueError("AF index must be between 1 and 5000")
+        arg = (ct.c_int32 * 1)(int(index))
+        out = (ct.c_int32 * 2)()
+        self._cmd(CMD_GET_AF_ZPRINT, arg, out=out)
+        return int(out[0]), int(out[1])
+
+    def af_move_to_index(self, index: int, speed: int = 1, tolerance: int = 0) -> None:
+        """Move Z drive to recorded best AF position index (1-5000)."""
+        if not 1 <= int(index) <= 5000:
+            raise ValueError("AF index must be between 1 and 5000")
+        arg = (ct.c_int32 * 3)(int(index), int(speed), int(tolerance))
+        self._cmd(CMD_MOVE_AF_ZPRINT_POS, arg)
+
+    def autofocus(
+        self,
+        io_channel: int = 1,
+        z_relative_dev: int = 500000,
+        speed: int = 9,
+        scan_duration_s: float = 1.0,
+        live_callback: Callable[[], Any] | None = None,
+        best_index: int | None = 1,
+        move_to_best: bool = True,
+    ) -> bool:
+        """Run Ti2 SDK contrast AF / Auto Focus FLUO sequence.
+
+        Follows dedicated command sequence from Nikon Ti2 SDK:
+          1. Configure I/O port trigger edge (SET_IO_CONTROL_BOX / SET_IO_CONTROLBOX_TRIGGER_EDGE).
+          2. Arm RUN_AF on specified exposure I/O channel.
+          3. Reset AF timestamp and start RUN_AF_ZPRINT search.
+          4. Wait for camera exposure triggers during live_callback / scan_duration_s.
+          5. STOP_AF_ZPRIN.
+          6. Move to target focus index (MOVE_AF_ZPRINT_POS) if requested.
+          7. STOP_AF.
+
+        Parameters
+        ----------
+        io_channel : int
+            Camera exposure signal I/O port (1-8 control box).
+        z_relative_dev : int
+            Z search range in linear scale device units (default 500000).
+        speed : int
+            AF Z-drive speed (default 9).
+        scan_duration_s : float
+            Time in seconds to wait for frame trigger collection if live_callback is not provided.
+        live_callback : callable, optional
+            Optional hook invoked while AF-ZPRINT is acquiring triggers (e.g. camera capture loop).
+        best_index : int, optional
+            Best contrast slice index (1-5000). If provided and move_to_best is True,
+            drives stage to that position.
+        move_to_best : bool
+            Whether to call MOVE_AF_ZPRINT_POS after stopping Z-print.
+
+        Returns
+        -------
+        bool
+            True if the AF sequence completed without error.
+        """
+        try:
+            self.af_setup_io()
+            self.af_start(
+                io_channel=io_channel,
+                z_relative_dev=z_relative_dev,
+                speed=speed,
+            )
+
+            if live_callback is not None:
+                live_callback()
+            elif scan_duration_s > 0:
+                time.sleep(float(scan_duration_s))
+
+            self.af_stop_zprint()
+
+            if move_to_best and best_index is not None:
+                self.af_move_to_index(best_index)
+
+            return True
+        finally:
+            try:
+                self.af_stop()
+            except Exception:
+                pass
