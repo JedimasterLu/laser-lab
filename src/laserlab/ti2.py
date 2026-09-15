@@ -6,10 +6,11 @@ PFS functions are kept as independent helpers (pfs_on / pfs_off / pfs_wait).
 
 from __future__ import annotations
 
+import collections.abc as cabc
 import ctypes as ct
 import os
 import time
-from typing import Any, Callable
+from typing import Any
 
 LX_OK = 0
 _ERR = {
@@ -58,6 +59,10 @@ CMD_MOVE_AF_ZPRINT_POS = "MOVE_AF_ZPRINT_POS"
 CMD_RESET_AF_TIMESTAMP = "RESET_AF_TIMESTAMP"
 CMD_SET_IO_CONTROL_BOX = "SET_IO_CONTROL_BOX"
 CMD_SET_IO_CONTROLBOX_TRIGGER_EDGE = "SET_IO_CONTROLBOX_TRIGGER_EDGE"
+
+# Objective Z-height hard limits in micrometres (um)
+DEFAULT_Z_MIN_UM: float = 500.0
+DEFAULT_Z_MAX_UM: float = 2600.0
 
 _DEFAULT_DLL = r"C:\Program Files\Nikon\Ti2-SDK\Bin\Ti2_Mic_Driver.dll"
 
@@ -187,7 +192,13 @@ class NikonTi2:
         dll_path: str | None = None,
         device_index: int = 0,
         simulator: bool = False,
+        z_min_um: float = DEFAULT_Z_MIN_UM,
+        z_max_um: float = DEFAULT_Z_MAX_UM,
     ) -> None:
+        if float(z_min_um) > float(z_max_um):
+            raise ValueError(f"z_min_um ({z_min_um}) cannot be greater than z_max_um ({z_max_um})")
+        self.z_min_um = float(z_min_um)
+        self.z_max_um = float(z_max_um)
         path = _resolve_dll(dll_path)
         if NikonTi2._dll is None or NikonTi2._dll_path != path:
             NikonTi2._dll = ct.CDLL(path)
@@ -286,6 +297,11 @@ class NikonTi2:
         return self._to_phys(MASK_Z, self._get(MASK_Z).iZPOSITION)
 
     def set_z(self, um: float, speed: int = 1, tolerance: int = 0) -> float:
+        um = float(um)
+        if not (self.z_min_um <= um <= self.z_max_um):
+            raise ValueError(
+                f"Target Z position {um:.2f} um is out of safe hard limits [{self.z_min_um:.2f}, {self.z_max_um:.2f}] um"
+            )
         data = MIC_Data()
         data.uiDataUsageMask = MASK_Z
         data.iZPOSITION = self._to_dev(MASK_Z, um)
@@ -495,6 +511,16 @@ class NikonTi2:
         """Move Z drive to recorded best AF position index (1-5000)."""
         if not 1 <= int(index) <= 5000:
             raise ValueError("AF index must be between 1 and 5000")
+        try:
+            _, pos_dev = self.af_get_zprint_pos(index)
+            pos_um = self._to_phys(MASK_Z, pos_dev)
+            if not (self.z_min_um <= pos_um <= self.z_max_um):
+                raise ValueError(
+                    f"AF target position {pos_um:.2f} um for index {index} is out of safe hard limits [{self.z_min_um:.2f}, {self.z_max_um:.2f}] um"
+                )
+        except Exception as e:
+            if isinstance(e, ValueError) and "safe hard limits" in str(e):
+                raise
         arg = (ct.c_int32 * 3)(int(index), int(speed), int(tolerance))
         self._cmd(CMD_MOVE_AF_ZPRINT_POS, arg)
 
@@ -504,7 +530,7 @@ class NikonTi2:
         z_relative_dev: int = 500000,
         speed: int = 9,
         scan_duration_s: float = 1.0,
-        live_callback: Callable[[], Any] | None = None,
+        live_callback: cabc.Callable[[], Any] | None = None,
         best_index: int | None = 1,
         move_to_best: bool = True,
     ) -> bool:
