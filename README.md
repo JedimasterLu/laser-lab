@@ -243,6 +243,53 @@ If the image is too bright/dark:
 
 ---
 
+## Nikon Ti2 autofocus (`NikonTi2`)
+
+`NikonTi2.autofocus_with_camera()` performs a software contrast autofocus scan. It moves the Z stage through explicit positions, captures one image at each position, evaluates the image with a built-in Laplacian-variance sharpness metric, and optionally moves to the position with the highest score.
+
+The camera object must provide `get_image()`. The default usage is:
+
+```python
+result = microscope.autofocus_with_camera(
+    camera,
+    scan_half_range_um=50,       # scan current Z +/- 50 um
+    scan_steps=40,               # capture 40 frames / positions
+    stop_on_sharpness_drop=True, # stop after two consecutive decreases
+    move_to_best=True,
+)
+
+print(result.best_z_um, result.best_score)
+```
+
+To use a different metric, pass `sharpness_function=your_function`. The function receives one image and returns a numeric score. The built-in metric is also available as `NikonTi2.calculate_sharpness(image)`.
+
+Important parameters:
+
+| Parameter | Description |
+|---|---|
+| `scan_half_range_um` | Half-width of the scan around the current Z position. The range is clipped to the configured hard limits. |
+| `scan_steps` | Number of Z positions and, consequently, maximum number of captured frames. Must be at least 2. |
+| `stop_on_sharpness_drop` | If enabled, stop after two consecutive strictly lower scores returned by the sharpness function. |
+| `move_to_best` | Move to the best measured Z position after scanning. |
+
+For a faster coarse-to-fine scan, use `quick_autofocus_with_camera()`. It runs a coarse scan followed by a fine scan centered on the coarse result and returns both `AutofocusCameraResult` objects:
+
+```python
+coarse, fine = microscope.quick_autofocus_with_camera(
+    camera,
+    coarse_half_range_um=100,
+    coarse_steps=10,
+    fine_half_range_um=20,
+    fine_steps=20,
+    stop_on_sharpness_drop=True,
+)
+print(fine.best_z_um, fine.best_score)
+```
+
+Each result contains `sharpness`, `z_positions_um`, `best_index`, `best_score`, and `best_z_um`. These software autofocus methods do not depend on Nikon TTL AF indices.
+
+---
+
 ## Capturing images
 
 ### Basic capture

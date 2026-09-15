@@ -1,24 +1,14 @@
 """联合测试：相机采流 + Ti2 显微镜对比度自动对焦"""
-import cv2
-import numpy as np
 from laserlab.camera import NikonDSFi3Camera
 from laserlab.ti2 import NikonTi2
 
 CAMERA_DLL = r"C:\Program Files\Nikon\DSCamSDK\Samples\KsCamExample\SDK\DSCam.dll"
 
-def calculate_sharpness(image: np.ndarray) -> float:
-    """使用拉普拉斯算子方差评估图像清晰度"""
-    if image.dtype == np.uint16:
-        img_8u = (image >> 4).astype(np.uint8)
-    else:
-        img_8u = image.astype(np.uint8)
-    return float(cv2.Laplacian(img_8u, cv2.CV_64F).var())
-
 def test_autofocus_with_camera():
     with NikonTi2() as mic, NikonDSFi3Camera(
         dll_path=CAMERA_DLL,
         camera_index=0,
-        exposure_s=0.0032,
+        exposure_s=0.006,
         verbose=False,
     ) as cam:
 
@@ -26,7 +16,6 @@ def test_autofocus_with_camera():
         mic.set_dia_lamp(on=True, percent=100)  # 打开透射光
         coarse_result, fine_result = mic.quick_autofocus_with_camera(
             cam,
-            calculate_sharpness,
             speed=1,
             coarse_half_range_um=100,
             coarse_steps=10,
@@ -43,8 +32,6 @@ def test_autofocus_with_camera():
 
 if __name__ == "__main__":
     # Print current z position
-    import sys
-    print(f"Python {sys.version} | OpenCV {cv2.__version__}")
     with NikonTi2() as mic:
         z_pos = mic.get_z()
         print(f"当前 Z 位置: {z_pos:.2f} um")

@@ -13,6 +13,9 @@ import os
 import time
 from typing import Any
 
+import cv2
+import numpy as np
+
 LX_OK = 0
 _ERR = {
     0: "LX_OK",
@@ -320,6 +323,15 @@ class NikonTi2:
         data.iZPOSITIONSpeed = int(speed)
         data.iZPOSITIONTolerance = int(tolerance)
         return self._to_phys(MASK_Z, self._set(data).iZPOSITION)
+
+    @staticmethod
+    def calculate_sharpness(image: np.ndarray) -> float:
+        """Calculate focus sharpness using the variance of the Laplacian."""
+        if image.dtype == np.uint16:
+            image_8u = (image >> 4).astype(np.uint8)
+        else:
+            image_8u = image.astype(np.uint8)
+        return float(cv2.Laplacian(image_8u, cv2.CV_64F).var())
 
     # --- LED: DIA lamp (0-100%) and EPI LED (channel 1-4, level 1-6 = 10-100%) ---
 
@@ -655,7 +667,7 @@ class NikonTi2:
     def autofocus_with_camera(
         self,
         camera: Any,
-        sharpness_function: cabc.Callable[[Any], float],
+        sharpness_function: cabc.Callable[[Any], float] | None = None,
         *,
         speed: int = 1,
         scan_duration_s: float = 1.0,
@@ -666,9 +678,12 @@ class NikonTi2:
     ) -> AutofocusCameraResult:
         """Run a software autofocus scan using a camera-like object.
 
-        ``camera`` must provide ``get_image()``. ``sharpness_function`` receives
-        each image and returns its numeric sharpness score.
+        ``camera`` must provide ``get_image()``. By default, sharpness is
+        calculated with :meth:`calculate_sharpness`; pass a custom function to
+        use another metric.
         """
+        if sharpness_function is None:
+            sharpness_function = self.calculate_sharpness
         sharpness: list[float] = []
         z_positions_um: list[float] = []
 
@@ -704,7 +719,7 @@ class NikonTi2:
     def quick_autofocus_with_camera(
         self,
         camera: Any,
-        sharpness_function: cabc.Callable[[Any], float],
+        sharpness_function: cabc.Callable[[Any], float] | None = None,
         *,
         speed: int = 1,
         scan_duration_s: float = 1.0,
