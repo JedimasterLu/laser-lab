@@ -1,50 +1,10 @@
 [
     {
         "phase": 1,
-        "angle_deg": 15.0,
-        "step_um": 3.0,
-        "sweep_time_s": 3.0,
-        "velocity_um_s": 23.570226039551585,
-        "iterations": 5
-    },
-    {
-        "phase": 2,
-        "angle_deg": 30.0,
-        "step_um": 3.0,
-        "sweep_time_s": 3.0,
-        "velocity_um_s": 23.570226039551585,
-        "iterations": 5
-    },
-    {
-        "phase": 3,
-        "angle_deg": 45.0,
-        "step_um": 3.0,
-        "sweep_time_s": 3.0,
-        "velocity_um_s": 23.570226039551585,
-        "iterations": 5
-    },
-    {
-        "phase": 4,
-        "angle_deg": 60.0,
-        "step_um": 3.0,
-        "sweep_time_s": 3.0,
-        "velocity_um_s": 23.570226039551585,
-        "iterations": 5
-    },
-    {
-        "phase": 5,
-        "angle_deg": 75.0,
-        "step_um": 3.0,
-        "sweep_time_s": 3.0,
-        "velocity_um_s": 23.570226039551585,
-        "iterations": 5
-    },
-    {
-        "phase": 6,
         "angle_deg": 90.0,
         "step_um": 3.0,
-        "sweep_time_s": 3.0,
-        "velocity_um_s": 23.570226039551585,
-        "iterations": 5
+        "sweep_time_s": 5.0,
+        "velocity_um_s": 14.142135623730951,
+        "iterations": 10
     }
 ]

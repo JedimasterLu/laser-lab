@@ -7,6 +7,8 @@ import time
 import cv2
 import laserlab
 
+CAMERA_DLL = r"C:\Program Files\Nikon\DSCamSDK\Samples\KsCamExample\SDK\DSCam.dll"
+
 def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
     """
     Generate the 4 vertices of a rectangle given two opposite diagonal corners.
@@ -226,6 +228,23 @@ def visualize_angled_path(bounds: tuple, scan_points: np.ndarray, angle_deg: flo
     
     print("Close the plot window to continue hardware execution...")
     plt.show()
+
+
+def save_frame(path: str, image: np.ndarray) -> None:
+    arr = np.asarray(image)
+
+    if arr.dtype != np.uint8:
+        arr = arr.astype(np.float32)
+        lo = float(arr.min())
+        hi = float(arr.max())
+        if hi > lo:
+            arr = ((arr - lo) / (hi - lo) * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            arr = np.zeros_like(arr, dtype=np.uint8)
+
+    ok = cv2.imwrite(path, arr)
+    if not ok:
+        raise RuntimeError(f"failed to write image: {path}")
     
 def main_pipeline():
     print("=== PUF Laser Automation Pipeline ===")
@@ -365,10 +384,13 @@ def main_pipeline():
     
     if auto_cam_choice == 'y':
         print("Initializing Nikon camera...")
-        dll_path = r"C:\Program Files\Nikon\DSCam\DSCam.dll" 
         try:
-            camera = laserlab.NikonDSFi3Camera(dll_path=dll_path)
-            camera.set_exposure(0.1) # 100ms default
+            camera = laserlab.NikonDSFi3Camera(
+                dll_path=CAMERA_DLL,
+                camera_index=0,
+                exposure_s=3e-3,
+                verbose=True,
+            )
             print("Camera successfully linked.")
         except Exception as e:
             print(f"Failed to initialize camera: {e}\nFalling back to manual camera mode.")
@@ -381,7 +403,7 @@ def main_pipeline():
     # ---------------------------------------------------------
     print("\n--- 4. Beginning Execution Loop ---")
     
-    global_run_counter = 1
+    global_run_counter = 0
     total_runs = sum(phase["iterations"] for phase in routine_dictionary)
 
     for phase in routine_dictionary:
@@ -406,12 +428,16 @@ def main_pipeline():
             print("Moving to center for Pre-Scan Image...")
             stage.move_to(center_x, center_y)
             time.sleep(0.5) 
-            
-            if camera:
-                img = camera.get_image()
-                cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_Before.tif", img)
-            else:
-                input("MANUAL MODE: Please capture the Pre-Scan image, then press Enter...")
+
+            # Capture a pre-scan image
+            if global_run_counter == 0:  # Only capture the first pre-scan image for the very first run
+                if camera:
+                    img = camera.get_image()
+                    # cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_Before.tif", img)
+                    save_frame(f"PUF_Runs/Run={global_run_counter}.tif", img)
+                    global_run_counter += 1
+                else:
+                    input("MANUAL MODE: Please capture the Pre-Scan image, then press Enter...")
 
             # HARDWARE EXECUTION
             print("Moving to scan start position...")
@@ -441,7 +467,7 @@ def main_pipeline():
             
             if camera:
                 img = camera.get_image()
-                cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_After.tif", img)
+                save_frame(f"PUF_Runs/Run={global_run_counter}_angle_deg={phase['angle_deg']}_step_size={phase['step_um']}_velocity={phase['velocity_um_s']:.2f}.tif", img)
             else:
                 input("MANUAL MODE: Please capture the Post-Scan image, then press Enter...")
                 

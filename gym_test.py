@@ -16,7 +16,7 @@ import numpy as np
 from laserlab import NikonDSFi3Camera, NanoparticleStageEnv, ProScanStage
 
 STAGE_PORT = "COM3"
-CAMERA_DLL = r"C:\Program Files\Nikon\DSCam\DSCam.dll"
+CAMERA_DLL = r"C:\Program Files\Nikon\DSCamSDK\Samples\KsCamExample\SDK\DSCam.dll"
 MOVE_STEPS = 500.0
 N_LOOPS = 2
 OUT_DIR = Path(__file__).resolve().parent / "gym_test_output"
@@ -40,7 +40,18 @@ class FakeParticleDetector:
 
 def save_frame(path: Path, image: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(path), image)
+    arr = np.asarray(image)
+
+    if arr.dtype != np.uint8:
+        arr = arr.astype(np.float32)
+        lo = float(arr.min())
+        hi = float(arr.max())
+        if hi > lo:
+            arr = ((arr - lo) / (hi - lo) * 255.0).clip(0, 255).astype(np.uint8)
+        else:
+            arr = np.zeros_like(arr, dtype=np.uint8)
+
+    ok = cv2.imwrite(str(path), arr)
     if not ok:
         raise RuntimeError(f"failed to write image: {path}")
 
@@ -57,9 +68,18 @@ def main() -> None:
         log(f"stage position={stage.position}")
 
         log(f"opening camera dll={CAMERA_DLL}")
-        camera = NikonDSFi3Camera(dll_path=CAMERA_DLL, camera_index=0, verbose=True)
+        camera = NikonDSFi3Camera(
+            dll_path=CAMERA_DLL,
+            camera_index=0,
+            exposure_s=3e-3,
+            verbose=True,
+        )
         height, width = camera.shape
         log(f"camera shape=(H={height}, W={width}) exposure_s={camera.get_exposure()}")
+
+        # Save initial frame to disk for reference.
+        image_path = OUT_DIR / "loop_0.png"
+        save_frame(image_path, camera.get_image())
 
         rng = np.random.default_rng()
         fake_particles = np.stack(
@@ -94,7 +114,7 @@ def main() -> None:
         for i in range(1, N_LOOPS + 1):
             log(f"loop {i}/{N_LOOPS} step(action={action.tolist()})")
             obs, reward, terminated, truncated, info = env.step(action)
-            image_path = OUT_DIR / f"loop_{i}.tif"
+            image_path = OUT_DIR / f"loop_{i}.png"
             save_frame(image_path, info["image"])
             log(
                 f"loop {i}/{N_LOOPS} done stage_xy={obs['stage_xy'].tolist()} "

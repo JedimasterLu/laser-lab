@@ -7,6 +7,7 @@ logic is intentionally left as a placeholder.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Protocol, runtime_checkable
 
 import gymnasium as gym
@@ -51,6 +52,8 @@ class TrackpyDetector:
         )
         if features is None or len(features) == 0:
             return np.zeros((0, 2), dtype=np.float32)
+        # Brightest spot first so LaserTrapEnv can treat it as the laser.
+        features = features.sort_values("mass", ascending=False)
         return features[["x", "y"]].to_numpy(dtype=np.float32)
 
 
@@ -216,3 +219,162 @@ class NanoparticleStageEnv(gym.Env):
     def close(self) -> None:
         # Hardware lifetime is owned by the caller.
         return None
+
+
+class LaserTrapEnv(gym.Env):
+    """Low-dim HER env: Trackpy (x, y) of Au particle and laser, no raw images.
+
+    Observation (SB3 HER Dict)
+        observation / achieved_goal: Au particle xy in um, shape (2,)
+        desired_goal: laser xy in um, shape (2,)
+
+    Action
+        Relative stage move (encoder steps).
+
+    Safety
+        Reset places the laser 3-5 um from the particle. Each episode is
+        truncated at 60 s and the beam is forced off for cooldown.
+    """
+
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+
+    def __init__(
+        self,
+        camera: Any,
+        stage: Any,
+        shutter: Any | None = None,
+        laser: Any | None = None,
+        detector: ParticleDetector | DetectFn | None = None,
+        um_per_pixel: float = 1.0,
+        reset_radius_um: tuple[float, float] = (3.0, 5.0),
+        success_um: float = 0.5,
+        episode_s: float = 60.0,
+        cooldown_s: float = 10.0,
+        max_episode_steps: int | None = None,
+        action_low: float | np.ndarray = -50.0,
+        action_high: float | np.ndarray = 50.0,
+        wait_after_move: bool = True,
+        render_mode: str | None = None,
+    ):
+        super().__init__()
+        self.camera = camera
+        self.stage = stage
+        self.shutter = shutter
+        self.laser = laser
+        self.detector = _as_detector(detector)
+        self.um_per_pixel = float(um_per_pixel)
+        self.reset_radius_um = (float(reset_radius_um[0]), float(reset_radius_um[1]))
+        self.success_um = float(success_um)
+        self.episode_s = float(episode_s)
+        self.cooldown_s = float(cooldown_s)
+        self.max_episode_steps = None if max_episode_steps is None else int(max_episode_steps)
+        self.wait_after_move = bool(wait_after_move)
+        self.render_mode = render_mode
+
+        self.action_space = spaces.Box(
+            low=action_low, high=action_high, shape=(2,), dtype=np.float32
+        )
+        self._action_low = np.broadcast_to(np.asarray(action_low, dtype=np.float32), (2,)).copy()
+        self._action_high = np.broadcast_to(np.asarray(action_high, dtype=np.float32), (2,)).copy()
+        xy = spaces.Box(-np.inf, np.inf, shape=(2,), dtype=np.float32)
+        self.observation_space = spaces.Dict(
+            {"observation": xy, "achieved_goal": xy, "desired_goal": xy}
+        )
+
+        self._t0 = 0.0
+        self._step_count = 0
+        self._last_image: np.ndarray | None = None
+
+    def _beam(self, on: bool) -> None:
+        if self.shutter is not None:
+            self.shutter.open() if on else self.shutter.close()
+        if self.laser is not None:
+            self.laser.enable_emission(on)
+
+    def _xy_um(self, pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Brightest spot = laser, next = Au particle. Missing spots -> NaN."""
+        pts = _as_xy(pts)
+        nan = np.array([np.nan, np.nan], dtype=np.float32)
+        laser = pts[0] * self.um_per_pixel if len(pts) >= 1 else nan
+        particle = pts[1] * self.um_per_pixel if len(pts) >= 2 else nan
+        return particle, laser
+
+    def _obs_from_xy(self, particle: np.ndarray, laser: np.ndarray) -> dict[str, np.ndarray]:
+        p = np.nan_to_num(particle, nan=0.0).astype(np.float32)
+        g = np.nan_to_num(laser, nan=0.0).astype(np.float32)
+        # HER keys: particle xy is the achieved goal, laser xy is the target.
+        return {"observation": p, "achieved_goal": p, "desired_goal": g}
+
+    def _capture(self) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        image = np.asarray(self.camera.get_image())
+        particle, laser = self._xy_um(self.detector.detect(image))
+        self._last_image = image
+        obs = self._obs_from_xy(particle, laser)
+        dist = float(np.linalg.norm(obs["achieved_goal"] - obs["desired_goal"]))
+        return obs, {"is_success": dist < self.success_um, "distance_um": dist}
+
+    def compute_reward(
+        self,
+        achieved_goal: np.ndarray,
+        desired_goal: np.ndarray,
+        info: dict[str, Any] | list[dict[str, Any]],
+    ) -> np.ndarray:
+        # Sparse HER reward: 0 on success, -1 otherwise. Vectorized for replay.
+        del info
+        ag = np.atleast_2d(np.asarray(achieved_goal, dtype=np.float32))
+        dg = np.atleast_2d(np.asarray(desired_goal, dtype=np.float32))
+        d = np.linalg.norm(ag - dg, axis=-1)
+        return (-(d > self.success_um).astype(np.float32)).reshape(-1)
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
+        super().reset(seed=seed)
+        del options
+        self._beam(True)
+        image = np.asarray(self.camera.get_image())
+        particle, laser = self._xy_um(self.detector.detect(image))
+        if np.isfinite(particle).all() and np.isfinite(laser).all():
+            r = float(self.np_random.uniform(*self.reset_radius_um))
+            ang = float(self.np_random.uniform(0.0, 2.0 * np.pi))
+            target = laser + r * np.array([np.cos(ang), np.sin(ang)], dtype=np.float32)
+            delta_um = target - particle
+            spm = float(getattr(self.stage, "steps_per_micron", 1.0))
+            self.stage.move_by(float(delta_um[0] * spm), float(delta_um[1] * spm))
+            if self.wait_after_move:
+                self.stage.wait()
+        self._t0 = time.monotonic()
+        self._step_count = 0
+        return self._capture()
+
+    def step(self, action: np.ndarray) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        action = np.clip(np.asarray(action, dtype=np.float32).reshape(2), self._action_low, self._action_high)
+        self.stage.move_by(float(action[0]), float(action[1]))
+        if self.wait_after_move:
+            self.stage.wait()
+        obs, info = self._capture()
+        reward = float(self.compute_reward(obs["achieved_goal"], obs["desired_goal"], info)[0])
+        terminated = bool(info["is_success"])
+        self._step_count += 1
+        truncated = (time.monotonic() - self._t0) >= self.episode_s
+        if self.max_episode_steps is not None:
+            truncated = truncated or self._step_count >= self.max_episode_steps
+        if terminated or truncated:
+            self._beam(False)
+            if self.cooldown_s > 0:
+                time.sleep(self.cooldown_s)
+        return obs, reward, terminated, truncated, info
+
+    def render(self) -> np.ndarray | None:
+        if self.render_mode != "rgb_array" or self._last_image is None:
+            return None
+        gray = np.asarray(_to_gray(self._last_image), dtype=np.float32)
+        peak = float(gray.max()) if gray.size else 1.0
+        rgb = np.clip(gray * (255.0 / max(peak, 1.0)), 0, 255).astype(np.uint8)
+        return np.stack([rgb, rgb, rgb], axis=-1)
+
+    def close(self) -> None:
+        self._beam(False)

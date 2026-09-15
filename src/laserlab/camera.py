@@ -360,6 +360,12 @@ class NikonDSFi3Camera(Camera):
         name: str = "Nikon DS-Fi3",
         verbose: bool = True,
         image_buffer_num: int = DEF_DRIVER_BUFFER_NUM,
+        exposure_s: float | None = None,
+        exposure_mode: int | None = ecemManual,
+        gain: int | None = None,
+        trigger_mode: int | None = None,
+        format_color: int | None = None,
+        format_mode: int | None = None,
         **kwargs: Any,
     ):
         dll_path = os.fspath(dll_path)
@@ -379,7 +385,10 @@ class NikonDSFi3Camera(Camera):
         self.camera_index = int(camera_index)
         self.verbose = bool(verbose)
         self.image_buffer_num = max(1, min(128, int(image_buffer_num)))
-        self._cached_exposure_s = float(self._default_exposure_s)
+        if exposure_s is None:
+            exposure_s = float(self._default_exposure_s)
+        self._cached_exposure_s = float(exposure_s)
+        self._cached_gain: int | None = None
         self._handle = ct.c_uint32(0)
         self._transfer_started = False
         self._frame_size = 0
@@ -395,18 +404,14 @@ class NikonDSFi3Camera(Camera):
 
         self._open_devices()
         self._open_camera()
-
-        try:
-            self._set_feature_uint32(eExposureMode, ecemManual)
-        except Exception as error:
-            if verbose:
-                print(f"Warning: could not set ExposureMode=Manual: {error}")
-
-        try:
-            self._set_exposure_hw(self._cached_exposure_s)
-        except Exception as error:
-            if verbose:
-                print(f"Warning: could not apply default exposure: {error}")
+        self._apply_startup_features(
+            exposure_s=float(exposure_s),
+            exposure_mode=exposure_mode,
+            gain=gain,
+            trigger_mode=trigger_mode,
+            format_color=format_color,
+            format_mode=format_mode,
+        )
 
         detected = self._detect_resolution_hw()
         if resolution is None:
@@ -517,6 +522,50 @@ class NikonDSFi3Camera(Camera):
     def is_transfer_started(self) -> bool | None:
         return self._is_transfer_started_hw()
 
+    def _apply_startup_features(
+        self,
+        exposure_s: float,
+        exposure_mode: int | None,
+        gain: int | None,
+        trigger_mode: int | None,
+        format_color: int | None,
+        format_mode: int | None,
+    ) -> None:
+        """Apply constructor camera settings before the first capture."""
+        if format_color is not None or format_mode is not None:
+            try:
+                self._set_format_hw(format_color, format_mode)
+            except Exception as error:
+                if self.verbose:
+                    print(f"Warning: could not apply Format: {error}")
+
+        if trigger_mode is not None:
+            try:
+                self._set_feature_uint32(eTriggerMode, int(trigger_mode))
+            except Exception as error:
+                if self.verbose:
+                    print(f"Warning: could not set TriggerMode={trigger_mode}: {error}")
+
+        if exposure_mode is not None:
+            try:
+                self._set_feature_uint32(eExposureMode, int(exposure_mode))
+            except Exception as error:
+                if self.verbose:
+                    print(f"Warning: could not set ExposureMode={exposure_mode}: {error}")
+
+        try:
+            self._set_exposure_hw(exposure_s)
+        except Exception as error:
+            if self.verbose:
+                print(f"Warning: could not apply exposure={exposure_s} s: {error}")
+
+        if gain is not None:
+            try:
+                self._set_gain_hw(gain)
+            except Exception as error:
+                if self.verbose:
+                    print(f"Warning: could not apply gain={gain}: {error}")
+
     def _get_exposure_hw(self):
         try:
             usec = self._get_feature_uint32(eExposureTime)
@@ -525,14 +574,43 @@ class NikonDSFi3Camera(Camera):
         except Exception:
             return float(self._cached_exposure_s)
 
-    def _set_exposure_hw(self, exposure_s):
-        exposure_s = float(exposure_s)
-        usec = int(round(exposure_s * 1e6))
+    @staticmethod
+    def _exposure_s_to_usec(exposure_s: float) -> int:
+        usec = int(round(float(exposure_s) * 1e6))
         usec = max(100, min(120_000_000, usec))
         if usec >= 1000:
             usec = (usec // 1000) * 1000
+        return usec
+
+    def _set_exposure_hw(self, exposure_s):
+        usec = self._exposure_s_to_usec(exposure_s)
         self._set_feature_uint32(eExposureTime, usec)
         self._cached_exposure_s = usec * 1e-6
+        if self.verbose:
+            print(f"ExposureTime={usec} us ({self._cached_exposure_s} s)")
+
+    def _get_gain_hw(self) -> int:
+        value = self._get_feature_uint32(eGain)
+        self._cached_gain = value
+        return value
+
+    def _set_gain_hw(self, gain: int) -> None:
+        gain = int(gain)
+        if gain < 0:
+            raise ValueError(f"gain must be >= 0, got {gain}")
+        self._set_feature_uint32(eGain, gain)
+        self._cached_gain = gain
+        if self.verbose:
+            print(f"Gain={gain}")
+
+    def get_gain(self) -> int | None:
+        try:
+            return self._get_gain_hw()
+        except Exception:
+            return self._cached_gain
+
+    def set_gain(self, gain: int) -> None:
+        self._set_gain_hw(gain)
 
     def _get_image_hw(self, timeout_s=None):
         self._start_transfer_hw()
@@ -630,6 +708,10 @@ class NikonDSFi3Camera(Camera):
                 values[0].stVariant.u.ui32Value = ct.c_uint32(int(set_value))
             elif var_type == evrt_int32:
                 values[0].stVariant.u.i32Value = ct.c_int32(int(set_value))
+            elif var_type == evrt_Format:
+                color, mode = set_value
+                values[0].stVariant.u.stFormat.eColor = int(color)
+                values[0].stVariant.u.stFormat.eMode = int(mode)
             else:
                 raise NotImplementedError(f"Unsupported feature variant type {var_type}")
 
@@ -664,6 +746,25 @@ class NikonDSFi3Camera(Camera):
         self._image_color = int(fmt.eColor)
         self._format_mode = int(fmt.eMode)
         return self._image_color, self._format_mode
+
+    def _set_format_hw(self, format_color: int | None, format_mode: int | None) -> None:
+        if format_color is None or format_mode is None:
+            current_color, current_mode = self._get_format_hw()
+            color = current_color if format_color is None else int(format_color)
+            mode = current_mode if format_mode is None else int(format_mode)
+        else:
+            color = int(format_color)
+            mode = int(format_mode)
+        vector, _values = self._make_feature_vector(eFormat, evrt_Format, set_value=(color, mode))
+        result = self.dll.CAM_SetFeatures(self._handle, ct.byref(vector))
+        if result != LX_OK:
+            raise RuntimeError(
+                f"CAM_SetFeatures(Format color={color} mode={mode}) failed: {_lx_name(result)}"
+            )
+        self._image_color = color
+        self._format_mode = mode
+        if self.verbose:
+            print(f"Format set: color={color} mode={mode}")
 
     def _detect_resolution_hw(self):
         try:

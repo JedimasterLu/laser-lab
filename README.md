@@ -93,6 +93,8 @@ DLL_PATH = r"C:\Program Files\Nikon\DSCamSDK\Samples\KsCamExample\SDK\DSCam.dll"
 camera = NikonDSFi3Camera(
     dll_path=DLL_PATH,
     camera_index=0,
+    exposure_s=0.05,   # 50 ms, applied at open
+    gain=100,          # optional analog gain
     verbose=True,
 )
 
@@ -142,6 +144,12 @@ NikonDSFi3Camera(
     name: str = "Nikon DS-Fi3",
     verbose: bool = True,
     image_buffer_num: int = 3,
+    exposure_s: float | None = None,   # seconds; default 0.1
+    exposure_mode: int | None = 2,     # Manual; None keeps camera default
+    gain: int | None = None,
+    trigger_mode: int | None = None,
+    format_color: int | None = None,
+    format_mode: int | None = None,
     **kwargs,  # forwarded to slmsuite.hardware.cameras.camera.Camera
 )
 ```
@@ -158,6 +166,11 @@ NikonDSFi3Camera(
 | `name` | Camera name used by `slmsuite`. |
 | `verbose` | Print open/format/transfer/ImageInfo diagnostics. |
 | `image_buffer_num` | Driver image buffer count for `CAM_CMD_START_FRAMETRANSFER` (SDK sample uses `3`; clamped to `1..128`). |
+| `exposure_s` | Exposure time in **seconds**, applied immediately after `CAM_Open`. Default `0.1`. |
+| `exposure_mode` | DSCam `eExposureMode`. Default `2` (Manual). Pass `None` to leave the camera mode unchanged. |
+| `gain` | Optional analog gain (`eGain`). Omitted values are left at the camera default. |
+| `trigger_mode` | Optional `eTriggerMode` (`0` Off, `1` Hard, `2` Soft). |
+| `format_color` / `format_mode` | Optional image format (`eFormat`). If omitted, the current camera format is kept. |
 | `**kwargs` | Extra `slmsuite.Camera` options such as `capture_attempts`, `averaging`, `hdr`, `rot`, `fliplr`, `flipud`, `exposure_bounds_s`. |
 
 ### What happens during `__init__`
@@ -165,11 +178,10 @@ NikonDSFi3Camera(
 1. Load `DSCam.dll` once (class-level shared SDK handle).
 2. Call `CAM_OpenDevices` (shared across instances in-process).
 3. Open the selected device with `CAM_Open`.
-4. Force **manual exposure mode**.
-5. Apply a default exposure of **0.1 s**.
-6. Detect image format / resolution.
-7. Allocate a frame buffer large enough for `uiFrameSize`.
-8. Call `slmsuite.Camera.__init__`, which may capture a probe frame to determine `dtype`.
+4. Apply constructor camera features **before the first capture**: format, trigger, exposure mode, exposure time, gain.
+5. Detect image format / resolution.
+6. Allocate a frame buffer large enough for `uiFrameSize`.
+7. Call `slmsuite.Camera.__init__`, which may capture a probe frame to determine `dtype`.
 
 ---
 
@@ -211,7 +223,7 @@ print(camera.get_exposure())  # ~0.01
 - The wrapper converts:
   - set: `seconds -> microseconds`
   - get: `microseconds -> seconds`
-- Exposure mode is forced to **Manual** (`eExposureMode = 2`) on open.
+- Exposure mode defaults to **Manual** (`eExposureMode = 2`) on open; override with `exposure_mode=...` or pass `None` to keep the camera setting.
 - Values are clamped roughly to `[100 us, 120 s]`.
 - For exposures `>= 1 ms`, the value is quantized to whole milliseconds (SDK-friendly rounding).
 
