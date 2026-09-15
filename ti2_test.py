@@ -8,7 +8,7 @@ def test_autofocus_with_camera():
     with NikonTi2() as mic, NikonDSFi3Camera(
         dll_path=CAMERA_DLL,
         camera_index=0,
-        exposure_s=0.006,
+        exposure_s=3e-3,
         verbose=False,
     ) as cam:
 

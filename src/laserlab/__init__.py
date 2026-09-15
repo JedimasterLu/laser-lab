@@ -6,3 +6,4 @@ from .slm import EXULUS
 from .camera import NikonDSFi3Camera
 from .gym import LaserTrapEnv, NanoparticleStageEnv, TrackpyDetector
 from .sim import SimLaserEnv
+from .ti2 import NikonTi2

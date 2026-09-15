@@ -326,7 +326,29 @@ class NikonTi2:
 
     @staticmethod
     def calculate_sharpness(image: np.ndarray) -> float:
-        """Calculate focus sharpness using the variance of the Laplacian."""
+        """Calculate focus sharpness using normalized variance (default).
+
+        Normalized variance compensates for differences in average image intensity
+        among different images, making it robust across varying lighting conditions.
+
+        Formula: F_normalized_variance = (1 / (H * W * μ)) * Σ(i(x,y) - μ)²
+        where H, W are image dimensions, μ is mean intensity.
+        """
+        image_float = image.astype(np.float64)
+        mean = image_float.mean()
+        if mean == 0:
+            return 0.0
+        h, w = image_float.shape[:2]
+        variance = ((image_float - mean) ** 2).sum() / (h * w)
+        return float(variance / mean)
+
+    @staticmethod
+    def calculate_sharpness_laplacian(image: np.ndarray) -> float:
+        """Calculate focus sharpness using the variance of the Laplacian (legacy).
+
+        This is the original sharpness metric. For compatibility with varying
+        lighting conditions, prefer calculate_sharpness (normalized variance).
+        """
         if image.dtype == np.uint16:
             image_8u = (image >> 4).astype(np.uint8)
         else:
@@ -720,7 +742,6 @@ class NikonTi2:
         self,
         camera: Any,
         sharpness_function: cabc.Callable[[Any], float] | None = None,
-        *,
         speed: int = 1,
         scan_duration_s: float = 1.0,
         coarse_half_range_um: float = 100.0,
