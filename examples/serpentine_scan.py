@@ -392,6 +392,8 @@ def main_pipeline():
                 verbose=True,
             )
             print("Camera successfully linked.")
+            microscope = laserlab.NikonTi2()
+            print("Microscope successfully linked.")
         except Exception as e:
             print(f"Failed to initialize camera: {e}\nFalling back to manual camera mode.")
             camera = None
@@ -432,6 +434,7 @@ def main_pipeline():
             # Capture a pre-scan image
             if global_run_counter == 0:  # Only capture the first pre-scan image for the very first run
                 if camera:
+                    microscope.quick_autofocus_with_camera(camera, stop_on_sharpness_drop=False)
                     img = camera.get_image()
                     # cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_Before.tif", img)
                     save_frame(f"PUF_Runs/Run={global_run_counter}.tif", img)
@@ -466,6 +469,7 @@ def main_pipeline():
             
             
             if camera:
+                microscope.quick_autofocus_with_camera(camera, stop_on_sharpness_drop=False)
                 img = camera.get_image()
                 save_frame(f"PUF_Runs/Run={global_run_counter}_angle_deg={phase['angle_deg']}_step_size={phase['step_um']}_velocity={phase['velocity_um_s']:.2f}.tif", img)
             else:
