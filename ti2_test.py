@@ -10,4 +10,5 @@ with NikonTi2() as mic:                    # 无设备时加 simulator=True
     mic.set_turret(1, position=3, shutter=True)  # turret 1|2，位 1–6
     mic.set_filter(1, 2)                         # 滤光轮 1|2，位 1–7
 
-    ok = mic.autofocus(timeout_ms=10000)   # PFS，成功则 True
+    # 荧光/对比度自动对焦（Auto Focus FLUO，基于 RUN_AF / AF-ZPRINT）
+    ok = mic.autofocus(io_channel=1, scan_duration_s=1.0)
