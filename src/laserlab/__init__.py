@@ -1,4 +1,5 @@
 from .shutter import SC30Shutter
+from .chopper import Chopper, MC2000BChopper
 from .stage import ProScanStage
 from .utils import print_ports
 from .laser import LaserControl
