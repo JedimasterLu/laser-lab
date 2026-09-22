@@ -16,8 +16,8 @@ class Chopper:
 	BLADE_INDEX = 6
 	INNER_SLOTS = 10
 	OUTER_SLOTS = 100
-	MIN_FREQUENCY_HZ = 20.0
-	MAX_FREQUENCY_HZ = 1000.0
+	MIN_FREQUENCY_HZ = 200.0
+	MAX_FREQUENCY_HZ = 10000.0
 
 	_REFERENCE_MODES: dict[Ring, int] = {"outer": 0, "inner": 1}
 	_OUTPUT_MODES: dict[Ring, int] = {"outer": 1, "inner": 2}
@@ -37,6 +37,10 @@ class Chopper:
 		response = self.ser.read_until(b">").decode("ascii", errors="replace").strip()
 		if not response:
 			raise TimeoutError(f"No response received for command {command!r}")
+		if response.startswith("CMD_ARG_"):
+			raise ValueError(
+				f"Chopper rejected command {command!r}: {response}"
+			)
 		return response
 
 	def _query_number(self, command: str) -> float:
@@ -48,7 +52,8 @@ class Chopper:
 
 	def _configure_blade(self) -> None:
 		self._send_command(f"blade={self.BLADE_INDEX}")
-		self._set_ring("inner")
+		# The manual's internal-reference setup uses INT-OUTER for MC1F10HP.
+		self._set_ring("outer")
 
 	def _set_ring(self, ring: Ring) -> None:
 		self._send_command(f"ref={self._REFERENCE_MODES[ring]}")
@@ -81,7 +86,7 @@ class Chopper:
 				f"Frequency must be between {self.MIN_FREQUENCY_HZ:g} and "
 				f"{self.MAX_FREQUENCY_HZ:g} Hz"
 			)
-		self._send_command(f"freq={frequency_hz:g}")
+		self._send_command(f"freq={round(frequency_hz):d}")
 
 	def get_frequency(self) -> float:
 		"""Read the actual pulse frequency of the selected blade ring."""
