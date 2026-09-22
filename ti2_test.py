@@ -8,19 +8,18 @@ def test_autofocus_with_camera():
     with NikonTi2() as mic, NikonDSFi3Camera(
         dll_path=CAMERA_DLL,
         camera_index=0,
-        exposure_s=3e-3,
+        exposure_s=4e-3,
         verbose=False,
     ) as cam:
-
         print("执行自动对焦...")
         mic.set_dia_lamp(on=True, percent=100)  # 打开透射光
         coarse_result, fine_result = mic.quick_autofocus_with_camera(
             cam,
             speed=1,
-            coarse_half_range_um=100,
+            coarse_half_range_um=50,
             coarse_steps=10,
-            fine_half_range_um=20,
-            fine_steps=30,
+            fine_half_range_um=5,
+            fine_steps=40,
         )
         print(
             f"粗调最佳 Z: {coarse_result.best_z_um:.2f} um, "
@@ -34,5 +33,5 @@ if __name__ == "__main__":
     # Print current z position
     with NikonTi2() as mic:
         z_pos = mic.get_z()
-        print(f"当前 Z 位置: {z_pos:.2f} um")
+        print(f"{z_pos:.2f} um")
     test_autofocus_with_camera()

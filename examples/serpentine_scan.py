@@ -388,7 +388,7 @@ def main_pipeline():
             camera = laserlab.NikonDSFi3Camera(
                 dll_path=CAMERA_DLL,
                 camera_index=0,
-                exposure_s=3e-3,
+                exposure_s=4e-3,
                 verbose=True,
             )
             print("Camera successfully linked.")
@@ -434,7 +434,14 @@ def main_pipeline():
             # Capture a pre-scan image
             if global_run_counter == 0:  # Only capture the first pre-scan image for the very first run
                 if camera:
-                    microscope.quick_autofocus_with_camera(camera, stop_on_sharpness_drop=False)
+                    microscope.quick_autofocus_with_camera(
+                        camera,
+                        speed=1,
+                        coarse_half_range_um=50,
+                        coarse_steps=10,
+                        fine_half_range_um=5,
+                        fine_steps=40
+                    )
                     img = camera.get_image()
                     # cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_Before.tif", img)
                     save_frame(f"PUF_Runs/Run={global_run_counter}.tif", img)
@@ -469,7 +476,14 @@ def main_pipeline():
             
             
             if camera:
-                microscope.quick_autofocus_with_camera(camera, stop_on_sharpness_drop=False)
+                microscope.quick_autofocus_with_camera(
+                    camera,
+                    speed=1,
+                    coarse_half_range_um=50,
+                    coarse_steps=10,
+                    fine_half_range_um=5,
+                    fine_steps=40
+                )
                 img = camera.get_image()
                 save_frame(f"PUF_Runs/Run={global_run_counter}_angle_deg={phase['angle_deg']}_step_size={phase['step_um']}_velocity={phase['velocity_um_s']:.2f}.tif", img)
             else:

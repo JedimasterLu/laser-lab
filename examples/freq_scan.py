@@ -35,6 +35,11 @@ def scan_frequency(
 				progress = elapsed / duration_s
 				frequency = min_frequency + (max_frequency - min_frequency) * progress
 				chopper.set_frequency(frequency)
+				print(
+					f"target={frequency:.1f} Hz, "
+					f"actual={chopper.get_frequency():.1f} Hz",
+					flush=True,
+				)
 				time.sleep(min(update_interval_s, deadline - now))
 
 			chopper.set_frequency(max_frequency)
