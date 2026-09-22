@@ -18,3 +18,5 @@ docs/
 *ipynb
 
 temp/
+
+.pytest_cache/

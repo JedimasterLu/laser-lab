@@ -32,6 +32,9 @@ _ERR = {
 }
 
 MASK_Z = 0x1
+MASK_X = 0x2
+MASK_Y = 0x4
+MASK_NOSEPIECE = 0x8
 MASK_TURRET1 = 0x10
 MASK_TURRET1_SH = 0x20
 MASK_TURRET2 = 0x40
@@ -42,6 +45,11 @@ MASK_PFS_STATUS = 0x40000
 MASK_PFS_DM = 0x80000
 MASK_FILTER1 = 0x1000000
 MASK_FILTER2 = 0x2000000
+MASK_CONDENSER = 0x100
+MASK_LIGHTPATH = 0x200
+MASK_SHUTTER_EPI = 0x400
+MASK_SHUTTER_DIA = 0x800
+MASK_SHUTTER_AUX = 0x1000
 MASK_DIA_SW = 0x4000000
 MASK_DIA_POS = 0x8000000
 MASK_EPI_UNIT = 0x4000000000
@@ -187,6 +195,102 @@ class MIC_AFZBuffer(ct.Structure):
     ]
 
 
+class MIC_Objective(ct.Structure):
+    _fields_ = [
+        ("wszOrderNumber", ct.c_wchar * 8),
+        ("dMagnification", ct.c_double),
+        ("dNumericalAperture", ct.c_double),
+        ("iIsPFSEnabled", ct.c_int32),
+        ("wszObjectiveModel", ct.c_wchar * 14),
+        ("wszWorkingDistance", ct.c_wchar * 4),
+        ("wszUsage", ct.c_wchar * 4),
+        ("wszObjectiveType", ct.c_wchar * 4),
+        ("wszWDType", ct.c_wchar * 5),
+        ("iPWS", ct.c_int32),
+        ("iCorrectionCollar", ct.c_int32),
+        ("iObservationMask", ct.c_int32),
+        ("wszPH_Module", ct.c_wchar * 7),
+        ("wszExPH_Module", ct.c_wchar * 4),
+        ("wszDIC_Module", ct.c_wchar * 2),
+        ("wszDIC_Slider", ct.c_wchar * 8),
+        ("wszDIC_ModuleHR", ct.c_wchar * 2),
+        ("wszDIC_SliderHR", ct.c_wchar * 10),
+        ("iDF_Module", ct.c_int32),
+        ("wszNAMC_Module", ct.c_wchar * 3),
+    ]
+
+
+class MIC_OpticsParts(ct.Structure):
+    _fields_ = [("wsLongName", ct.c_wchar * 30), ("wsShortName", ct.c_wchar * 10)]
+
+
+class MIC_Equipment(ct.Structure):
+    _fields_ = [("wszOrderNumber", ct.c_wchar * 8), ("wszReserve", ct.c_wchar * 1)]
+
+
+class MIC_EquipmentControl(ct.Structure):
+    _fields_ = [("uiEquipmentUsageMask", ct.c_uint64)] + [
+        (name, ct.c_int32)
+        for name in (
+            "iNosepieceControl", "iCondenserControl", "iTurret1Control",
+            "iTurret1ShutterControl", "iTurret2Control", "iTurret2ShutterControl",
+            "iAnalyzerSlotControl", "iLappMainBranch1Control",
+            "iLappMainBranch2Control", "iLappSubBranchControl",
+            "iPolarizerControl", "iStageControl", "iEyepieceCameraPortControl",
+            "iUnit1Control", "iUnit2Control", "iUnit3Control",
+        )
+    ]
+
+
+class MIC_Equipments(ct.Structure):
+    _equipment_names = (
+        "sNosepiece", "sCondenser", "sCondenserLens", "sTurret1", "sTurret2",
+        "sLapp1Branch1", "sLapp1Branch2", "sLapp1Module1", "sLapp1Module2",
+        "sLapp1Module3", "sLapp1Module1Illumination", "sLapp1Module2Illumination",
+        "sLapp1Module3Illumination", "sLapp1FieldStop", "sLapp2Branch1",
+        "sLapp2Branch2", "sLapp2Module1", "sLapp2Module2", "sLapp2Module3",
+        "sLapp2Module1Illumination", "sLapp2Module2Illumination",
+        "sLapp2Module3Illumination", "sLapp2FieldStop", "sDiaIllumination",
+        "sLightShield", "sPolarizer", "sStage", "sBA1", "sBA2", "sEyepiece",
+        "sEyepieceTubebase", "sAnalyzerSlot", "sUnit1", "sUnit2", "sUnit3",
+    )
+    _fields_ = [("uiEquipmentUsageMask", ct.c_uint64)] + [
+        (name, MIC_Equipment) for name in _equipment_names
+    ]
+
+
+class MIC_MetaData(ct.Structure):
+    _range_names = (
+        "iXYStage_XRangePhys", "iXYStage_YRangePhys", "iZDrive_RangePhys",
+        "iNosepiece_RangePhys", "iCondenser_RangePhys", "iDICPrism_RangePhys",
+        "iDICPolarizer_RangePhys", "iTurret1_RangePhys", "iTurret1Shutter_RangePhys",
+        "iTurret2_RangePhys", "iTurret2Shutter_RangePhys", "iBar1_RangePhys",
+        "iBar2_RangePhys", "iLightpath_RangePhys", "iPfsSwitch_RangePhys",
+        "iPfsOffset_RangePhys", "iPfsDM_RangePhys", "iShutterEpi_RangePhys",
+        "iShutterDia_RangePhys", "iShutterAux_RangePhys", "iDiaLampSwitch_RangePhys",
+        "iDiaLampPos_RangePhys", "iIntensilightShutter_RangePhys",
+        "iIntensilightPosition_RangePhys", "iIntensilightSwitch_RangePhys",
+        "iEpiLEDUnit_RangePhys", "iEpiLEDSwitch_RangePhys", "iEpiLEDPos_RangePhys",
+        "iEyepiece_TubeBasePort_RangePhys", "iEyepiece_TubeBaseTurret_RangePhys",
+        "iLappMainBranch1_RangePhys", "iLappMainBranch2_RangePhys",
+        "iLappSubBranch_RangePhys", "iCorrectionCollar_RangePhys", "iOptZoom_RangePhys",
+        "iAnalyzerSlot_RangePhys", "iAnalyzerPos_RangePhys", "iPWSS_Switch_RangePhys",
+        "iPWSA_Switch_RangePhys", "iXYStage_XRangeLog", "iXYStage_YRangeLog",
+        "iZDrive_RangeLog",
+    )
+    _fields_ = [("uiMetaDataUsageMask", ct.c_uint64)]
+    _fields_ += [("sNosepieceObjective", MIC_Objective * 8)]
+    _fields_ += [(name, MIC_OpticsParts * 8) for name in (
+        "sCondenser", "sTurret1Filter", "sTurret2Filter", "sBar1FilterWheel",
+        "sBar2FilterWheel", "sLightPath_Prism", "sExternalPH_Ring",
+        "sLapp_MainBranch1", "sLapp_MainBranch2", "sDIC_Prism", "sOPT_Zoom", "sDSC",
+    )]
+    _fields_ += [("nEPI_LEDWavelength", ct.c_int32 * 4)]
+    _fields_ += [(name, ct.c_int32 * 2) for name in _range_names]
+    _fields_ += [("sEquipmentControl", MIC_EquipmentControl), ("sEquipmentOrder", MIC_Equipments)]
+    _fields_ += [("Reserve", ct.c_char * 1024)]
+
+
 def _resolve_dll(dll_path: str | None) -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     bundled = os.path.normpath(os.path.join(here, "..", "..", "docs", "Ti2-SDK", "bin", "Ti2_Mic_Driver.dll"))
@@ -238,6 +342,8 @@ class NikonTi2:
         dll.MIC_DataSet.restype = ct.c_int32
         dll.MIC_DataGet.argtypes = [ct.POINTER(MIC_Data)]
         dll.MIC_DataGet.restype = ct.c_int32
+        dll.MIC_MetadataGet.argtypes = [ct.POINTER(MIC_MetaData)]
+        dll.MIC_MetadataGet.restype = ct.c_int32
         dll.MIC_DedicatedCommand.argtypes = [ct.POINTER(MIC_Command), ct.c_void_p]
         dll.MIC_DedicatedCommand.restype = ct.c_int32
         dll.MIC_Convert_Dev2Phys.argtypes = [ct.c_uint64, ct.c_int32, ct.POINTER(ct.c_double)]
@@ -306,6 +412,12 @@ class NikonTi2:
         ptr = ct.cast(out, ct.c_void_p) if out is not None else None
         _check(self.dll.MIC_DedicatedCommand(ct.byref(cmd), ptr), name)
 
+    def get_metadata(self) -> MIC_MetaData:
+        """Read the microscope metadata and physical/logical ranges."""
+        metadata = MIC_MetaData()
+        _check(self.dll.MIC_MetadataGet(ct.byref(metadata)), "MIC_MetadataGet")
+        return metadata
+
     # --- Z (um) ---
 
     def get_z(self) -> float:
@@ -323,6 +435,89 @@ class NikonTi2:
         data.iZPOSITIONSpeed = int(speed)
         data.iZPOSITIONTolerance = int(tolerance)
         return self._to_phys(MASK_Z, self._set(data).iZPOSITION)
+
+    def get_x(self) -> float:
+        return self._to_phys(MASK_X, self._get(MASK_X).iXPOSITION)
+
+    def get_y(self) -> float:
+        return self._to_phys(MASK_Y, self._get(MASK_Y).iYPOSITION)
+
+    def _set_xy(self, mask: int, position_um: float, speed: int, tolerance: int) -> float:
+        data = MIC_Data()
+        data.uiDataUsageMask = mask
+        if mask == MASK_X:
+            data.iXPOSITION = self._to_dev(mask, position_um)
+            data.iXPOSITIONSpeed = int(speed)
+            data.iXPOSITIONTolerance = int(tolerance)
+            field = "iXPOSITION"
+        else:
+            data.iYPOSITION = self._to_dev(mask, position_um)
+            data.iYPOSITIONSpeed = int(speed)
+            data.iYPOSITIONTolerance = int(tolerance)
+            field = "iYPOSITION"
+        return self._to_phys(mask, getattr(self._set(data), field))
+
+    def set_x(self, um: float, speed: int = 1, tolerance: int = 0) -> float:
+        return self._set_xy(MASK_X, float(um), speed, tolerance)
+
+    def set_y(self, um: float, speed: int = 1, tolerance: int = 0) -> float:
+        return self._set_xy(MASK_Y, float(um), speed, tolerance)
+
+    def get_nosepiece(self) -> int:
+        return int(self._get(MASK_NOSEPIECE).iNOSEPIECE)
+
+    def set_nosepiece(self, position: int) -> int:
+        if not 1 <= int(position) <= 6:
+            raise ValueError("nosepiece position must be 1-6")
+        data = MIC_Data()
+        data.uiDataUsageMask = MASK_NOSEPIECE
+        data.iNOSEPIECE = int(position)
+        return int(self._set(data).iNOSEPIECE)
+
+    def get_condenser(self) -> int:
+        return int(self._get(MASK_CONDENSER).iCONDENSER)
+
+    def set_condenser(self, position: int) -> int:
+        if not 1 <= int(position) <= 7:
+            raise ValueError("condenser position must be 1-7")
+        data = MIC_Data()
+        data.uiDataUsageMask = MASK_CONDENSER
+        data.iCONDENSER = int(position)
+        return int(self._set(data).iCONDENSER)
+
+    def get_lightpath(self) -> int:
+        return int(self._get(MASK_LIGHTPATH).iLIGHTPATH)
+
+    def set_lightpath(self, position: int) -> int:
+        if not 1 <= int(position) <= 4:
+            raise ValueError("lightpath position must be 1-4")
+        data = MIC_Data()
+        data.uiDataUsageMask = MASK_LIGHTPATH
+        data.iLIGHTPATH = int(position)
+        return int(self._set(data).iLIGHTPATH)
+
+    def get_shutter(self, shutter: str) -> bool:
+        mask, field = self._shutter_spec(shutter)
+        return bool(getattr(self._get(mask), field))
+
+    def set_shutter(self, shutter: str, on: bool) -> bool:
+        mask, field = self._shutter_spec(shutter)
+        data = MIC_Data()
+        data.uiDataUsageMask = mask
+        setattr(data, field, 1 if on else 0)
+        return bool(getattr(self._set(data), field))
+
+    @staticmethod
+    def _shutter_spec(shutter: str) -> tuple[int, str]:
+        specs = {
+            "epi": (MASK_SHUTTER_EPI, "iSHUTTER_EPI"),
+            "dia": (MASK_SHUTTER_DIA, "iSHUTTER_DIA"),
+            "aux": (MASK_SHUTTER_AUX, "iSHUTTER_AUX"),
+        }
+        try:
+            return specs[shutter.lower()]
+        except KeyError as exc:
+            raise ValueError("shutter must be 'epi', 'dia', or 'aux'") from exc
 
     @staticmethod
     def calculate_sharpness(image: np.ndarray) -> float:
@@ -744,10 +939,10 @@ class NikonTi2:
         sharpness_function: cabc.Callable[[Any], float] | None = None,
         speed: int = 1,
         scan_duration_s: float = 1.0,
-        coarse_half_range_um: float = 100.0,
+        coarse_half_range_um: float = 50.0,
         coarse_steps: int = 10,
-        fine_half_range_um: float = 20.0,
-        fine_steps: int = 20,
+        fine_half_range_um: float = 5.0,
+        fine_steps: int = 40,
         stop_on_sharpness_drop: bool = True,
     ) -> tuple[AutofocusCameraResult, AutofocusCameraResult]:
         """Run coarse and fine camera autofocus scans.
