@@ -1,3 +1,4 @@
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import Polygon
@@ -229,10 +230,14 @@ def visualize_angled_path(bounds: tuple, scan_points: np.ndarray, angle_deg: flo
     print("Close the plot window to continue hardware execution...")
     plt.show()
 
-
-def save_frame(path: str, image: np.ndarray) -> None:
+def save_with_roi_crop(original_path: str, cropped_path: str, image: np.ndarray, pixel_bounds: tuple) -> None:
+    """
+    Normalizes a NumPy array to 8-bit, saves the full original image, 
+    and (if provided) saves a cropped ROI based on the provided pixel boundaries.
+    """
     arr = np.asarray(image)
 
+    # 1. Normalization
     if arr.dtype != np.uint8:
         arr = arr.astype(np.float32)
         lo = float(arr.min())
@@ -242,10 +247,28 @@ def save_frame(path: str, image: np.ndarray) -> None:
         else:
             arr = np.zeros_like(arr, dtype=np.uint8)
 
-    ok = cv2.imwrite(path, arr)
-    if not ok:
-        raise RuntimeError(f"failed to write image: {path}")
+    # 2. Save the Full Original Image
+    ok_orig = cv2.imwrite(original_path, arr)
+    if not ok_orig:
+        raise RuntimeError(f"Failed to write original image: {original_path}")
     
+    # 3. Extract Boundaries & Enforce Image Dimension Limits if cropping is enabled
+    if cropped_path and pixel_bounds:
+        min_x, min_y, max_x, max_y = pixel_bounds
+        
+        img_height, img_width = arr.shape[:2]
+        min_x = max(0, int(min_x))
+        min_y = max(0, int(min_y))
+        max_x = min(img_width, int(max_x))
+        max_y = min(img_height, int(max_y))
+        
+        # 4. Crop and Save the Cropped Image
+        if max_x > min_x and max_y > min_y:
+            cropped_arr = arr[min_y:max_y, min_x:max_x]
+            ok_crop = cv2.imwrite(cropped_path, cropped_arr)
+            if not ok_crop:
+                raise RuntimeError(f"Failed to write cropped image: {cropped_path}")
+
 def main_pipeline():
     print("=== PUF Laser Automation Pipeline ===")
     
@@ -258,6 +281,7 @@ def main_pipeline():
     stage = laserlab.ProScanStage(port=stage_port)
     shutter = laserlab.SC30Shutter(port=shutter_port)
     camera = None
+    microscope = None
 
     # ---------------------------------------------------------
     # 1. REGION SELECTION (3-Way Branch)
@@ -306,7 +330,7 @@ def main_pipeline():
                 print("Invalid command. Please enter 'a'.")
                 
         side_length_um = float(input("Enter the side length of the square in microns: "))
-        side_length_steps = side_length_um * stage.steps_per_micron # Assuming steps_per_micron is accessible
+        side_length_steps = side_length_um * stage.steps_per_micron 
         print("Note that the vertical axis is inverted - what appears to be the top right is actually bottom right")
         vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
         
@@ -325,9 +349,8 @@ def main_pipeline():
     center_y = (min_y + max_y) / 2.0
     print("ROI Polygon successfully established.")
 
-
     # ---------------------------------------------------------
-    # 2. ROUTINE DEVELOPMENT (Complex Dictionary)
+    # 2. ROUTINE DEVELOPMENT 
     # ---------------------------------------------------------
     print("\n--- 2. Routine Configuration ---")
     routine_dictionary = []
@@ -338,26 +361,17 @@ def main_pipeline():
     while True:
         print(f"\n--- Phase {phase_count} ---")
         
-        # Get the angle instead of H/V
         angle_input = input("Scan angle in degrees (e.g., 0 for horizontal, 90 for vertical, 45 for diagonal): ").strip()
         angle_deg = float(angle_input) if angle_input else 0.0
         
         step_um = float(input("Enter the step size (distance between lines) in microns: "))
-        sweep_time = float(input("Enter the desired sweep time per longest line in seconds: "))
+        velocity_um_s = float(input("Enter the desired sweep velocity in um/s: "))
         iterations = int(input(f"How many times should the {angle_deg}° scan run? "))
-        
-        # Calculate Required Velocity for this specific phase
-        # For an angled scan, we use the maximum diagonal distance to ensure safe, consistent velocity
-        diag_distance_um = np.sqrt((max_x - min_x)**2 + (max_y - min_y)**2) / stage.steps_per_micron
-            
-        velocity_um_s = diag_distance_um / sweep_time
 
-        # Append to our master dictionary
         phase_config = {
             "phase": phase_count,
             "angle_deg": angle_deg,
             "step_um": step_um,
-            "sweep_time_s": sweep_time,
             "velocity_um_s": velocity_um_s,
             "iterations": iterations
         }
@@ -370,18 +384,19 @@ def main_pipeline():
             phase_count += 1
             continue
 
-    # Save dictionary as a JSON file so it is human-readable later
     with open("routine_config.json", "w") as f:
         json.dump(routine_dictionary, f, indent=4)
     print("\nRoutine saved to 'routine_config.json'.")
 
-
     # ---------------------------------------------------------
-    # 3. CAMERA AUTOMATION PROMPT
+    # 3. CAMERA AUTOMATION & LOGGING
     # ---------------------------------------------------------
     print("\n--- 3. Camera Mode Selection ---")
     auto_cam_choice = input("Do you want to automate camera image captures? (y/n): ").strip().lower()
     
+    save_cropped = False
+    pixels_per_micron = 1.0
+
     if auto_cam_choice == 'y':
         print("Initializing Nikon camera...")
         try:
@@ -394,70 +409,99 @@ def main_pipeline():
             print("Camera successfully linked.")
             microscope = laserlab.NikonTi2()
             print("Microscope successfully linked.")
+            
+            crop_choice = input("Save cropped ROI images alongside originals? (y/n): ").strip().lower()
+            if crop_choice == 'y':
+                save_cropped = True
+                pixels_per_micron = float(input("Enter camera pixels per micron for accurate ROI cropping: "))
+                
         except Exception as e:
             print(f"Failed to initialize camera: {e}\nFalling back to manual camera mode.")
             camera = None
 
     os.makedirs("PUF_Runs", exist_ok=True)
+    
+    # Initialize Z-position CSV logger
+    csv_file_path = os.path.join("PUF_Runs", "z_positions.csv")
+    csv_file = open(csv_file_path, "w", newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(["Filename", "Z_Position"])
+
 
     # ---------------------------------------------------------
-    # 4. EXECUTION LOOP
+    # 4. BASELINE (PRE-SCAN) IMAGING
     # ---------------------------------------------------------
-    print("\n--- 4. Beginning Execution Loop ---")
+    print("\n--- 4. Capturing Baseline ROI Image ---")
+    print("Moving to center for Baseline Pre-Scan Image...")
+    stage.move_to(center_x, center_y)
+    time.sleep(0.5) 
+
+    if camera:
+        final_z = microscope.quick_autofocus_with_camera(
+            camera,
+            speed=1,
+            coarse_half_range_um=50,
+            coarse_steps=10,
+            fine_half_range_um=5,
+            fine_steps=40
+        )
+        
+        if final_z is None:
+            final_z = getattr(microscope, 'z', 'Unknown')
+            
+        img = camera.get_image()
+        
+        orig_name = "Baseline_PreScan.tif"
+        orig_path = os.path.join("PUF_Runs", orig_name)
+        crop_path = os.path.join("PUF_Runs", f"cropped_{orig_name}") if save_cropped else None
+        
+        pixel_bounds = None
+        if save_cropped:
+            img_h, img_w = img.shape[:2]
+            roi_w_pix = ((max_x - min_x) / stage.steps_per_micron) * pixels_per_micron
+            roi_h_pix = ((max_y - min_y) / stage.steps_per_micron) * pixels_per_micron
+            
+            pixel_bounds = (
+                int((img_w / 2) - (roi_w_pix / 2)),
+                int((img_h / 2) - (roi_h_pix / 2)),
+                int((img_w / 2) + (roi_w_pix / 2)),
+                int((img_h / 2) + (roi_h_pix / 2))
+            )
+            
+        save_with_roi_crop(orig_path, crop_path, img, pixel_bounds)
+        csv_writer.writerow([orig_name, final_z])
+    else:
+        input("MANUAL MODE: Please capture the Baseline Pre-Scan image, then press Enter...")
+
+
+    # ---------------------------------------------------------
+    # 5. EXECUTION LOOP
+    # ---------------------------------------------------------
+    print("\n--- 5. Beginning Execution Loop ---")
     
-    global_run_counter = 0
+    global_run_counter = 1
     total_runs = sum(phase["iterations"] for phase in routine_dictionary)
 
     for phase in routine_dictionary:
         print(f"\n================ STARTING PHASE {phase['phase']} ({phase['angle_deg']}° ANGLE) ================")
         
-        # 4a. Generate the path just once for this specific phase
+        # 5a. Generate the path just once for this specific phase
         step_steps = phase["step_um"] * stage.steps_per_micron
-        
-        # Call the newly updated angled generation function
         bounds = (min_x, min_y, max_x, max_y)
         scan_points = generate_angled_serpentine_path(bounds, step_steps, phase["angle_deg"])
         
-        # --- NEW: VISUALIZE THE PATH ---
         visualize_angled_path(bounds, scan_points, phase["angle_deg"])
-        # -------------------------------
         
-        # 4b. Execute iterations for this phase
+        # 5b. Execute iterations for this phase
         for i in range(phase["iterations"]):
             print(f"\n--- RUN {global_run_counter}/{total_runs} [Phase {phase['phase']}: {i+1}/{phase['iterations']}] ---")
-            
-            # PRE-SCAN IMAGING
-            print("Moving to center for Pre-Scan Image...")
-            stage.move_to(center_x, center_y)
-            time.sleep(0.5) 
-
-            # Capture a pre-scan image
-            if global_run_counter == 0:  # Only capture the first pre-scan image for the very first run
-                if camera:
-                    microscope.quick_autofocus_with_camera(
-                        camera,
-                        speed=1,
-                        coarse_half_range_um=50,
-                        coarse_steps=10,
-                        fine_half_range_um=5,
-                        fine_steps=40
-                    )
-                    img = camera.get_image()
-                    # cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_Before.tif", img)
-                    save_frame(f"PUF_Runs/Run={global_run_counter}.tif", img)
-                    global_run_counter += 1
-                else:
-                    input("MANUAL MODE: Please capture the Pre-Scan image, then press Enter...")
 
             # HARDWARE EXECUTION
             print("Moving to scan start position...")
             stage.move_to(scan_points[0][0], scan_points[0][1])
             time.sleep(0.5)
             
-            # Set the calculated velocity for this specific phase
             stage.set_velocity(phase["velocity_um_s"])
-            
-            #input("SAFETY: Turn ON the physical laser switch. Press Enter when ready...")
             
             try:
                 print(f"Executing {phase['angle_deg']}° scan at {phase['velocity_um_s']:.2f} um/s...")
@@ -466,17 +510,14 @@ def main_pipeline():
             finally:
                 shutter.close()
                 print("Scan complete. Shutter closed.")
-                
-            #input("SAFETY: Turn OFF the physical laser switch. Press Enter when ready...")
 
             # POST-SCAN IMAGING
             print("Moving to center for Post-Scan Image...")
             stage.move_to(center_x, center_y)
             time.sleep(0.5)
             
-            
             if camera:
-                microscope.quick_autofocus_with_camera(
+                final_z = microscope.quick_autofocus_with_camera(
                     camera,
                     speed=1,
                     coarse_half_range_um=50,
@@ -484,16 +525,42 @@ def main_pipeline():
                     fine_half_range_um=5,
                     fine_steps=40
                 )
+                
+                if final_z is None:
+                    final_z = getattr(microscope, 'z', 'Unknown')
+                    
                 img = camera.get_image()
-                save_frame(f"PUF_Runs/Run={global_run_counter}_angle_deg={phase['angle_deg']}_step_size={phase['step_um']}_velocity={phase['velocity_um_s']:.2f}.tif", img)
+                
+                orig_name = f"Run={global_run_counter}_angle_deg={phase['angle_deg']}_step_size={phase['step_um']}_velocity={phase['velocity_um_s']:.2f}.tif"
+                orig_path = os.path.join("PUF_Runs", orig_name)
+                crop_path = os.path.join("PUF_Runs", f"cropped_{orig_name}") if save_cropped else None
+                
+                pixel_bounds = None
+                if save_cropped:
+                    img_h, img_w = img.shape[:2]
+                    roi_w_pix = ((max_x - min_x) / stage.steps_per_micron) * pixels_per_micron
+                    roi_h_pix = ((max_y - min_y) / stage.steps_per_micron) * pixels_per_micron
+                    
+                    pixel_bounds = (
+                        int((img_w / 2) - (roi_w_pix / 2)),
+                        int((img_h / 2) - (roi_h_pix / 2)),
+                        int((img_w / 2) + (roi_w_pix / 2)),
+                        int((img_h / 2) + (roi_h_pix / 2))
+                    )
+                    
+                save_with_roi_crop(orig_path, crop_path, img, pixel_bounds)
+                csv_writer.writerow([orig_name, final_z])
             else:
                 input("MANUAL MODE: Please capture the Post-Scan image, then press Enter...")
                 
             global_run_counter += 1
             
     print("\n=== All Phases Complete! ===")
+    
+    # Safely close CSV and camera connections
+    csv_file.close()
     if camera:
         camera.close()
-
+    
 if __name__ == "__main__":
     main_pipeline()
