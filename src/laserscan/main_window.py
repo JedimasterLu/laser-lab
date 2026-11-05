@@ -708,6 +708,9 @@ class MainWindow(QMainWindow):
             _show(self.notice, str(exc), True)
 
     def _finish_run(self) -> None:
+        message = self.s.executor.message
+        if message:
+            _show(self.notice, f"Run stopped: {message}", True)
         self._lock(False)
         self.view_mode = "preview"
         self.view_buttons["preview"].setChecked(True)

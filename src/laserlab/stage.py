@@ -6,6 +6,9 @@ import numpy as np
 import serial
 
 
+POSITION_REPLY = r"-?\d+(\.\d+)?,-?\d+(\.\d+)?(,-?\d+(\.\d+)?)?"
+
+
 class ProScanStage:
     """Prior ProScan III stage controller over a serial port.
 
@@ -35,11 +38,27 @@ class ProScanStage:
         self.steps_per_micron = self.stage_info()["microsteps_per_um"] or 0.0
         self._velocity = self.velocity
 
-    def _query(self, command: str) -> str:
-        """Send a command and return its single-line reply."""
+    def _query(self, command: str, expect: str | None = None) -> str:
+        """Send a command and return its single-line reply.
+
+        Stale replies (e.g. to position requests sent while a move was running)
+        are discarded first, so an answer is never matched to the wrong command.
+
+        Args:
+            command: Command without the terminator.
+            expect: Regular expression the reply must fully match; other lines
+                are skipped (up to a few) until one does.
+        """
         with self._lock:
+            if self.ser.in_waiting:
+                self.ser.reset_input_buffer()
             self.ser.write(f"{command}\r".encode())
-            return self.ser.read_until(b"\r").decode().strip()
+            reply = self.ser.read_until(b"\r").decode().strip()
+            for _ in range(3):
+                if expect is None or re.fullmatch(expect, reply) or reply.startswith("E"):
+                    break
+                reply = self.ser.read_until(b"\r").decode().strip()
+            return reply
 
     def _take_position(self, reply: str) -> bool:
         """Record a position reply to ``live_position_um`` and report whether ``reply`` was one."""
@@ -135,7 +154,7 @@ class ProScanStage:
     @property
     def is_stop(self) -> bool:
         """Whether neither the X nor the Y axis is moving (``$,S`` status)."""
-        return self._query("$,S") == "0"
+        return self._query("$,S", r"\d+") == "0"
 
     def wait(self, max_time: float = 1):
         """Block until the stage stops or ``max_time`` seconds pass."""
@@ -150,10 +169,10 @@ class ProScanStage:
         Raises:
             RuntimeError: If the controller returns an error.
         """
-        reply = self._query("P")
+        reply = self._query("P", POSITION_REPLY)
         if reply.startswith("E"):
             raise RuntimeError(f"Stage error: {reply}")
-        x, y, _ = reply.split(",")
+        x, y = reply.split(",")[:2]
         return float(x), float(y)
 
     @property
@@ -234,15 +253,18 @@ class ProScanStage:
         while time.monotonic() < deadline:
             if self._abort.is_set():
                 return
-            if self.is_stop:
-                px, py = self.position
-                if max(abs(px - x), abs(py - y)) <= tolerance * self.units_per_um:
-                    return
-                stalled += 1
-                if stalled > 100:
-                    raise RuntimeError(f"Stage stopped at {(px, py)} instead of {(x, y)}")
-            else:
-                stalled = 0
+            try:
+                if self.is_stop:
+                    px, py = self.position
+                    if max(abs(px - x), abs(py - y)) <= tolerance * self.units_per_um:
+                        return
+                    stalled += 1
+                    if stalled > 300:
+                        raise RuntimeError(f"Stage stopped at {(px, py)} instead of {(x, y)}")
+                else:
+                    stalled = 0
+            except ValueError:  # a garbled reply: ask again
+                pass
             time.sleep(self.wait_time)
         raise TimeoutError(f"Stage did not reach {(x, y)}")
 

@@ -143,7 +143,8 @@ class Executor:
         except _Aborted:
             pass
         except Exception as exc:
-            self.message = f"Error: {exc}"
+            self.message = f"Error: {type(exc).__name__}: {exc}"
+            self.devices.log("!", self.message)
             self.abort(self.message)
         finally:
             self._laser_on = False
