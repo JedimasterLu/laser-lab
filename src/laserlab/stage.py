@@ -32,8 +32,7 @@ class ProScanStage:
         self._comp: str | None = None
         self.wait_time = wait_time
         self.units_per_um = float(units_per_um)
-        match = re.search(r"MICROSTEPS/MICRON\s*=\s*([\d.]+)", "\n".join(self.info))
-        self.steps_per_micron = float(match.group(1)) if match else 0.0
+        self.steps_per_micron = self.stage_info()["microsteps_per_um"] or 0.0
         self._velocity = self.velocity
 
     def _query(self, command: str) -> str:
@@ -97,6 +96,27 @@ class ProScanStage:
             self.ser.write("STAGE\r".encode())
             lines = self.ser.readlines()[0]
         return lines.decode().split("\r")
+
+    def stage_info(self) -> dict:
+        """Parse the ``STAGE`` reply.
+
+        Returns:
+            ``model`` (text), ``size_x_mm`` and ``size_y_mm`` (floats, ``None`` if
+            absent) and ``microsteps_per_um`` (float, ``None`` if absent).
+        """
+        text = "\n".join(self.info)
+
+        def number(key: str) -> float | None:
+            match = re.search(rf"{key}\s*=\s*([\d.]+)", text)
+            return float(match.group(1)) if match else None
+
+        model = re.search(r"STAGE\s*=\s*(.+)", text)
+        return {
+            "model": model.group(1).strip() if model else "",
+            "size_x_mm": number("SIZE_X"),
+            "size_y_mm": number("SIZE_Y"),
+            "microsteps_per_um": number("MICROSTEPS/MICRON"),
+        }
 
     @property
     def velocity(self) -> float:
@@ -192,9 +212,39 @@ class ProScanStage:
         except ValueError as exc:
             raise RuntimeError(f"Unexpected SAS/SCS reply: {exc}") from exc
 
-    def move_to(self, x: float, y: float):
-        """Move to the absolute position (x, y) in user units."""
+    def move_to(self, x: float, y: float, tolerance: float = 2.0, timeout: float = 300.0):
+        """Move to the absolute position (x, y) in user units and wait until it is reached.
+
+        The controller may reply ``R`` as soon as the command is accepted, so the
+        end of the move is confirmed from the motion status (``$,S``) and ``P``.
+
+        Args:
+            x: Target X in user units.
+            y: Target Y in user units.
+            tolerance: Allowed distance to the target in microns.
+            timeout: Maximum wait in seconds.
+
+        Raises:
+            RuntimeError: If the stage stops away from the target or the controller errors.
+            TimeoutError: If the target is not reached in time.
+        """
         self._move(f"G {round(x)},{round(y)}")
+        deadline = time.monotonic() + timeout
+        stalled = 0
+        while time.monotonic() < deadline:
+            if self._abort.is_set():
+                return
+            if self.is_stop:
+                px, py = self.position
+                if max(abs(px - x), abs(py - y)) <= tolerance * self.units_per_um:
+                    return
+                stalled += 1
+                if stalled > 100:
+                    raise RuntimeError(f"Stage stopped at {(px, py)} instead of {(x, y)}")
+            else:
+                stalled = 0
+            time.sleep(self.wait_time)
+        raise TimeoutError(f"Stage did not reach {(x, y)}")
 
     def move_to_um(self, x: float, y: float):
         """Move to the absolute position (x, y) in microns."""

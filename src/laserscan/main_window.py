@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import asdict
 
 from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -15,13 +16,15 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMainWindow,
+    QMenuBar,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -152,6 +155,21 @@ def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
     return frame, layout
 
 
+def _soften_popup(popup: QWidget) -> None:
+    """Make a popup window frameless and translucent so no dark border or square corners show."""
+    window = popup.window()
+    window.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+    window.setAttribute(Qt.WA_TranslucentBackground)
+
+
+def _combo() -> QComboBox:
+    combo = QComboBox()
+    combo.setItemDelegate(QStyledItemDelegate(combo))
+    combo.setMaxVisibleItems(12)
+    _soften_popup(combo.view())
+    return combo
+
+
 def _duration(seconds: float) -> str:
     minutes, secs = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
@@ -170,6 +188,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.s = SESSION
         self.profile = settings.load()
+        self.simulate = simulate or not HARDWARE_AVAILABLE
+        self._traffic_seen = 0
+        self._shutter_led: bool | None = None
         self.view_mode = "design"
         self.origin, self.motion = (0.0, 0.0), None
         self._run_plan: list = []
@@ -185,9 +206,8 @@ class MainWindow(QMainWindow):
         self.canvas.changed.connect(self.replan)
         self._shortcuts()
         QTimer(self, interval=200, timeout=self._poll).start()
-        if simulate or not HARDWARE_AVAILABLE:
+        if self.simulate:
             self.s.devices.connect(simulate=True, start=self._stage_center())
-        self._apply_stage()
         self._after_connect()
 
     def _stage_center(self) -> tuple[float, float]:
@@ -208,43 +228,56 @@ class MainWindow(QMainWindow):
         brand, version = QLabel("LaserScan"), QLabel(f"v{__version__}")
         brand.setObjectName("brand")
         version.setObjectName("version")
+        bar.addWidget(self._menu(), 0, Qt.AlignVCenter)
+        bar.addSpacing(8)
         bar.addWidget(brand)
         bar.addWidget(version)
         bar.addStretch(1)
         outer.addWidget(topbar)
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
         body.addWidget(self._sidebar())
+        body.addWidget(self._divider())
         body.addWidget(self._content(), 1)
         outer.addLayout(body, 1)
         self.setCentralWidget(root)
+
+    def _menu(self) -> QMenuBar:
+        """The "Files" menu in the top-left corner."""
+        menubar = QMenuBar()
+        menubar.setNativeMenuBar(False)
+        menubar.setFixedHeight(34)
+        menu = menubar.addMenu("Files")
+        _soften_popup(menu)
+        for text, shortcut, slot in (("Open…", QKeySequence.StandardKey.Open, self._open),
+                                     ("Save…", QKeySequence.StandardKey.Save, self._save)):
+            action = QAction(text, menu)
+            action.setShortcut(shortcut)
+            action.triggered.connect(slot)
+            menu.addAction(action)
+        return menubar
+
+    def _divider(self) -> QWidget:
+        """The grey line between the sidebar and the content."""
+        holder = QWidget()
+        holder.setFixedWidth(1)
+        line = QVBoxLayout(holder)
+        line.setContentsMargins(0, 20, 0, 20)
+        rule = QFrame()
+        rule.setObjectName("divider")
+        line.addWidget(rule)
+        return holder
 
     def _sidebar(self) -> QScrollArea:
         panel = QWidget()
         panel.setObjectName("sidebar")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(24, 20, 20, 20)
-        layout.setSpacing(20)
-
-        card, box = _card("Project")
-        row, flow = flow_widget(8)
-        for text, slot in (("Open", self._open), ("Save", self._save), ("Export CSV", self._export)):
-            button = _button(text)
-            button.clicked.connect(slot)
-            flow.addWidget(button)
-        box.addWidget(row)
-        self.project_msg = _alert(False)
-        box.addWidget(self.project_msg)
-        layout.addWidget(card)
+        layout.setSpacing(16)
 
         card, box = _card("Devices")
-        self.mode_group, row, self.mode_buttons = _pills(
-            [("Simulate", "sim"), ("Hardware", "hw")], "hw" if HARDWARE_AVAILABLE else "sim"
-        )
-        self.mode_buttons["hw"].setEnabled(HARDWARE_AVAILABLE)
-        self.mode_buttons["hw"].clicked.connect(self._refresh_ports)
-        box.addWidget(row)
-        self.stage_port, self.shutter_port = QComboBox(), QComboBox()
+        self.stage_port, self.shutter_port = _combo(), _combo()
         box.addWidget(_field("Stage port", self.stage_port))
         box.addWidget(_field("Shutter port", self.shutter_port))
         self._refresh_ports()
@@ -282,20 +315,22 @@ class MainWindow(QMainWindow):
             spin.valueChanged.connect(lambda _v: self._replan_timer.start())
         layout.addWidget(self.scan_card)
 
-        self.stage_card, box = _card("Stage settings")
-        self.st_model = QLineEdit(self.profile["model"])
-        (x0, x1), (y0, y1) = self.profile["x_range_um"], self.profile["y_range_um"]
-        self.st_x0, self.st_x1 = _spin(x0, -1e7, 1e7, 0), _spin(x1, -1e7, 1e7, 0)
-        self.st_y0, self.st_y1 = _spin(y0, -1e7, 1e7, 0), _spin(y1, -1e7, 1e7, 0)
-        self.st_units = _spin(self.profile["units_per_um"], 1e-4, 1e5, 4)
-        box.addWidget(_field("Model", self.st_model))
-        box.addWidget(_grid([_field("X min (µm)", self.st_x0), _field("X max (µm)", self.st_x1),
-                             _field("Y min (µm)", self.st_y0), _field("Y max (µm)", self.st_y1)]))
-        box.addWidget(_field("Controller units per µm", self.st_units))
-        self.st_model.editingFinished.connect(self._apply_stage)
-        for spin in (self.st_x0, self.st_x1, self.st_y0, self.st_y1, self.st_units):
-            spin.valueChanged.connect(self._apply_stage)
-        layout.addWidget(self.stage_card)
+        card, box = _card("Monitor")
+        row, flow = flow_widget(8)
+        self.hide_polling = _pill("Hide P / $,S polling", "Hide the position polling commands", True, True)
+        clear = _pill("Clear")
+        clear.clicked.connect(lambda: self.monitor.clear())
+        flow.addWidget(self.hide_polling)
+        flow.addWidget(clear)
+        box.addWidget(row)
+        self.monitor = QPlainTextEdit()
+        self.monitor.setObjectName("monitor")
+        self.monitor.setReadOnly(True)
+        self.monitor.setMaximumBlockCount(500)
+        self.monitor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.monitor.setFixedHeight(150)
+        box.addWidget(self.monitor)
+        layout.addWidget(card)
         layout.addStretch(1)
 
         scroll = QScrollArea()
@@ -323,7 +358,30 @@ class MainWindow(QMainWindow):
         self.badge.hide()
         title_row.addWidget(self.badge)
         title_row.addStretch(1)
+        self.led = QLabel()
+        self.led.setObjectName("led")
+        self.led.setFixedSize(12, 12)
+        self.led.setToolTip("Shutter")
+        self.start_btn = _button("Start", primary=True)
+        self.pause_btn = _button("Pause")
+        self.abort_btn = _button("Abort", danger=True)
+        self.start_btn.clicked.connect(self._start)
+        self.pause_btn.clicked.connect(self.s.executor.toggle_pause)
+        self.abort_btn.clicked.connect(lambda: self.s.executor.abort("Aborted by user"))
+        title_row.addWidget(_label("Shutter", "muted"))
+        title_row.addWidget(self.led)
+        title_row.addSpacing(8)
+        for button in (self.start_btn, self.pause_btn, self.abort_btn):
+            title_row.addWidget(button)
         box.insertLayout(0, title_row)
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(12)
+        self.status = _label("Idle", "muted")
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        progress_row.addWidget(self.status)
+        progress_row.addWidget(self.progress, 1)
+        box.insertLayout(1, progress_row)
         self.estimate = _label("", "muted", wrap=True)
         box.addWidget(self.estimate)
         box.addWidget(self._toolbar())
@@ -337,28 +395,6 @@ class MainWindow(QMainWindow):
         box.addWidget(self.cursor_label)
         layout.addWidget(card, 1)
 
-        card, box = _card("Run")
-        card.layout().setContentsMargins(18, 14, 18, 14)
-        card.layout().setSpacing(8)
-        row, flow = flow_widget(8)
-        self.start_btn = _button("Start", primary=True)
-        self.pause_btn = _button("Pause")
-        self.abort_btn = _button("Abort", danger=True)
-        self.start_btn.clicked.connect(self._start)
-        self.pause_btn.clicked.connect(self.s.executor.toggle_pause)
-        self.abort_btn.clicked.connect(lambda: self.s.executor.abort("Aborted by user"))
-        self.status = _label("Idle", "muted")
-        self.status.setAlignment(Qt.AlignVCenter)
-        self.status.setMinimumHeight(self.start_btn.sizeHint().height())
-        for widget in (self.start_btn, self.pause_btn, self.abort_btn, self.status):
-            flow.addWidget(widget)
-        box.addWidget(row)
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.run_msg = _alert()
-        box.addWidget(self.progress)
-        box.addWidget(self.run_msg)
-        layout.addWidget(card)
         return panel
 
     def _group(self, caption: str, flow, buttons: list[QPushButton]) -> None:
@@ -596,50 +632,29 @@ class MainWindow(QMainWindow):
         for widget in self.design_widgets:
             widget.setEnabled(mode == "design")
 
-    def _apply_stage(self) -> None:
-        (x0, x1), (y0, y1) = (self.st_x0.value(), self.st_x1.value()), (self.st_y0.value(), self.st_y1.value())
-        if x0 >= x1 or y0 >= y1:
-            return
-        self.profile = {
-            "model": self.st_model.text(),
-            "x_range_um": [x0, x1],
-            "y_range_um": [y0, y1],
-            "units_per_um": self.st_units.value(),
-        }
-        if self.s.devices.stage is not None and hasattr(self.s.devices.stage, "units_per_um"):
-            self.s.devices.stage.units_per_um = self.profile["units_per_um"]
+    def _apply_profile(self, profile: dict) -> None:
+        """Use a stage profile (read from the controller, or the default when simulating)."""
+        self.profile = profile
+        (x0, x1), (y0, y1) = profile["x_range_um"], profile["y_range_um"]
         self.canvas.set_stage(QRectF(x0, y0, x1 - x0, y1 - y0))
         self.replan()
 
-    def _load_profile(self, profile: dict) -> None:
-        merged = {**settings.DEFAULTS, **profile}
-        widgets = (
-            (self.st_x0, merged["x_range_um"][0]), (self.st_x1, merged["x_range_um"][1]),
-            (self.st_y0, merged["y_range_um"][0]), (self.st_y1, merged["y_range_um"][1]),
-            (self.st_units, merged["units_per_um"]),
-        )
-        for widget, value in widgets:
-            widget.blockSignals(True)
-            widget.setValue(value)
-            widget.blockSignals(False)
-        self.st_model.setText(merged["model"] or "")
-        self._apply_stage()
-
     def _refresh_ports(self) -> None:
-        ports = serial_ports() if HARDWARE_AVAILABLE else []
-        for combo, none in ((self.stage_port, ""), (self.shutter_port, "None")):
+        ports = serial_ports() if not self.simulate else []
+        for combo, none, default in ((self.stage_port, "", DEFAULT_PORTS[0]), (self.shutter_port, "None", DEFAULT_PORTS[1])):
             combo.clear()
-            default = DEFAULT_PORTS[combo is self.shutter_port]
-            combo.addItems(([none] if none else []) + ports)
-            if HARDWARE_AVAILABLE and default not in ports:
-                combo.addItem(default)
-            combo.setCurrentText(default if HARDWARE_AVAILABLE else combo.itemText(0))
-            combo.setEnabled(HARDWARE_AVAILABLE)
+            if self.simulate:
+                combo.addItem("Simulated")
+            else:
+                combo.addItems(([none] if none else []) + ports)
+                if default not in ports:
+                    combo.addItem(default)
+                combo.setCurrentText(default)
+            combo.setEnabled(not self.simulate)
 
     def _after_connect(self) -> None:
-        stage = self.s.devices.stage
-        if stage is not None and not self.s.devices.simulated and hasattr(stage, "units_per_um"):
-            self.st_units.setValue(stage.units_per_um)
+        dev = self.s.devices
+        self._apply_profile(dev.profile if dev.connected else settings.load())
         self._refresh_origin()
         self.replan()
 
@@ -654,7 +669,7 @@ class MainWindow(QMainWindow):
         try:
             shutter = self.shutter_port.currentText()
             s.devices.connect(
-                self.mode_buttons["sim"].isChecked(),
+                self.simulate,
                 self.stage_port.currentText() or None,
                 None if shutter in ("", "None") else shutter,
                 self.profile["units_per_um"],
@@ -662,23 +677,23 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             return _show(self.device_msg, f"Connection failed: {exc}", True)
-        _show(self.device_msg, s.devices.note, False)
+        _show(self.device_msg, s.devices.note, True)
         self._after_connect()
 
     def _lock(self, locked: bool) -> None:
-        for widget in (self.scan_card, self.stage_card, self.toolbar):
+        for widget in (self.scan_card, self.toolbar):
             widget.setEnabled(not locked)
         self.badge.setVisible(locked)
 
     def _start(self) -> None:
         s = self.s
-        _show(self.run_msg, "")
+        _show(self.notice, "", False)
         if not s.devices.connected:
-            return _show(self.run_msg, "Connect the devices first.")
+            return _show(self.notice, "Connect the devices first.", True)
         self._refresh_origin()
         self.replan()
         if s.problems or not s.plan:
-            return _show(self.run_msg, "Nothing to scan, or the plan leaves the stage range (see the Canvas card).")
+            return _show(self.notice, "Nothing to scan, or the plan leaves the stage range.", True)
         self._run_plan = shift(s.plan, self.origin)
         self.view_mode = "monitor"
         self.replan()
@@ -688,7 +703,7 @@ class MainWindow(QMainWindow):
             s.executor.start(self._run_plan, s.params.speed)
         except RuntimeError as exc:
             self._finish_run()
-            _show(self.run_msg, str(exc))
+            _show(self.notice, str(exc), True)
 
     def _finish_run(self) -> None:
         self._lock(False)
@@ -714,21 +729,42 @@ class MainWindow(QMainWindow):
         self.connect_btn.setText("Disconnect" if dev.connected else "Connect")
         kind = "Simulated" if dev.simulated else "Hardware"
         self.device_status.setText(f"{kind} devices connected" if dev.connected else "Not connected")
+        self._update_led(dev.shutter is not None and ex.shutter_open)
+        self._update_monitor()
         if running and self.view_mode == "monitor":
             if ex.done:
                 self.canvas.set_progress(self._run_plan, ex.seg, ex.pt)
             self.canvas.set_marker(ex.live_position())
         elif self._was_running:
             self._finish_run()
-            self.canvas.set_marker(dev.position_um())
+            self.canvas.set_marker(dev.position)
         elif self.view_mode == "preview":
-            position = dev.position_um()
+            position = dev.position
             self.canvas.set_marker(position)
             if position and not dev.simulated and math.dist(position, self.origin) > 0.5:
                 # Real stage: the serial-reported position is the origin (the joystick may move it).
                 self.origin = position
                 self.replan()
         self._was_running = running
+
+    def _update_led(self, on: bool) -> None:
+        if on != self._shutter_led:
+            self._shutter_led = on
+            self.led.setProperty("on", on)
+            self.led.style().unpolish(self.led)
+            self.led.style().polish(self.led)
+
+    def _update_monitor(self) -> None:
+        """Append the serial traffic logged since the last call."""
+        records, self._traffic_seen = self.s.devices.new_traffic(self._traffic_seen)
+        hide = self.hide_polling.isChecked()
+        lines = [
+            f"{time.strftime('%H:%M:%S', time.localtime(t))}.{int(t % 1 * 1000):03d} {direction} {text}"
+            for t, direction, text, poll in records
+            if not (poll and hide)
+        ]
+        if lines:
+            self.monitor.appendPlainText("\n".join(lines))
 
     def _open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open project", "", "LaserScan project (*.json)")
@@ -738,18 +774,20 @@ class MainWindow(QMainWindow):
             with open(path, encoding="utf-8") as f:
                 shapes, params, file_profile = project.loads(f.read())
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            return _show(self.project_msg, f"Cannot open project: {exc}")
+            return _show(self.notice, f"Cannot open project: {exc}", True)
         self._set_view("design")
         for key, value in asdict(params).items():
             widget = self.pattern_buttons.get(value) if key == "pattern" else getattr(self, key)
             widget.blockSignals(True)
             widget.setChecked(True) if key == "pattern" else widget.setValue(value)
             widget.blockSignals(False)
-        if file_profile:
-            self._load_profile(file_profile)
         self.canvas.set_shapes(shapes)
         self.canvas.fit()
-        _show(self.project_msg, "Stage settings were loaded from the file." if file_profile else "")
+        differs = file_profile and (
+            file_profile.get("x_range_um") != self.profile["x_range_um"]
+            or file_profile.get("y_range_um") != self.profile["y_range_um"]
+        )
+        _show(self.notice, "The project was drawn for a different stage range than the connected stage." if differs else "", True)
         self.replan()
 
     def _save(self) -> None:
@@ -757,14 +795,6 @@ class MainWindow(QMainWindow):
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(project.dumps(self.canvas.shapes(), self.params(), self.profile))
-
-    def _export(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Export CSV", "scan.csv", "CSV (*.csv)")
-        if path:
-            rows = ["segment,x_um,y_um,laser"]
-            rows += [f"{i},{x:.3f},{y:.3f},{int(g.laser)}" for i, g in enumerate(self.s.plan) for x, y in g.points]
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("\n".join(rows))
 
     def closeEvent(self, event) -> None:
         if self.s.executor.running and QMessageBox.question(

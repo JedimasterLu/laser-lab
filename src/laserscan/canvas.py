@@ -747,7 +747,8 @@ class Canvas(QGraphicsView):
     @property
     def zoom(self) -> float:
         """Pixels per micron."""
-        return abs(self.transform().m11()) or 1.0
+        t = self.transform()
+        return math.hypot(t.m11(), t.m12()) or 1.0
 
     @property
     def grid_step(self) -> float:
@@ -807,7 +808,8 @@ class Canvas(QGraphicsView):
         width, height = max(rect.width(), 20.0), max(rect.height(), 20.0)
         scale = 0.88 * min(self.viewport().width() / width, self.viewport().height() / height)
         scale = min(max(scale, ZOOM_RANGE[0]), ZOOM_RANGE[1])
-        self.setTransform(QTransform.fromScale(scale, -scale))
+        # Aligned with the camera: screen up is +X and screen right is +Y (the camera is rotated 90° from the stage).
+        self.setTransform(QTransform(0, -scale, scale, 0, 0, 0))
         self.centerOn(rect.center())
         self._refresh_items()
 

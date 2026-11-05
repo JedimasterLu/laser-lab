@@ -45,6 +45,7 @@ class Executor:
         self._resume = threading.Event()
         self._thread: threading.Thread | None = None
         self._laser_on = False
+        self.shutter_open = False
 
     @property
     def running(self) -> bool:
@@ -52,12 +53,8 @@ class Executor:
         return self.state is not State.IDLE
 
     def live_position(self) -> tuple[float, float] | None:
-        """Best available stage position in microns, also while moving."""
-        try:
-            live = getattr(self.devices.stage, "live_position_um", None)
-        except Exception:
-            live = None
-        return live or self.position
+        """Latest stage position read from the controller (microns), also while moving."""
+        return self.devices.position or self.position
 
     def start(self, plan: list[Segment], speed: float) -> None:
         """Start executing ``plan`` in the background.
@@ -101,6 +98,7 @@ class Executor:
         self._resume.set()
         self.message = reason
         shutter, stage = self.devices.shutter, self.devices.stage
+        self.shutter_open = False
         for action in (getattr(shutter, "close", None), getattr(stage, "stop", None)):
             try:
                 action and action()
@@ -120,6 +118,7 @@ class Executor:
     def _set_shutter(self, on: bool) -> None:
         if self.devices.shutter is not None:
             (self.devices.shutter.open if on else self.devices.shutter.close)()
+            self.shutter_open = on
 
     def _move(self, point, seg: int, pt: int) -> None:
         self._checkpoint()
