@@ -1,38 +1,106 @@
-import serial
+import re
+import threading
 import time
+
 import numpy as np
+import serial
+
 
 class ProScanStage:
-    def __init__(self, port: str, wait_time: float = 1e-2):
-        """The proscan III control instance.
+    """Prior ProScan III stage controller over a serial port.
+
+    Positions passed to ``move_to``, ``move_by`` and ``scan`` are controller
+    user units. The ``*_um`` methods convert from microns using ``units_per_um``.
+    """
+
+    def __init__(self, port: str, wait_time: float = 1e-2, units_per_um: float = 100.0):
+        """Open the controller.
 
         Args:
-            port (str): The port name.
-            wait_time (float, optional): The maximum time to wait for
-                the stage to reach the target position in seconds.
-                Defaults to 10 ms.
+            port: Serial port name.
+            wait_time: Polling interval in seconds used by ``wait``.
+            units_per_um: Controller user units per micron. Call
+                ``read_units_per_um`` to take it from the controller instead.
         """
         self.ser = serial.Serial(port, baudrate=9600, timeout=1)
+        self._lock = threading.RLock()
+        self._abort = threading.Event()
+        self._live_lock = threading.Lock()
+        self._moving = False
+        self._pending = 0
+        self._live: tuple[float, float] | None = None
+        self._comp: str | None = None
         self.wait_time = wait_time
+        self.units_per_um = float(units_per_um)
         self.steps_per_micron = float(self.info[4].split(" = ")[-1])
         self._velocity = self.velocity
 
+    def _query(self, command: str) -> str:
+        """Send a command and return its single-line reply."""
+        with self._lock:
+            self.ser.write(f"{command}\r".encode())
+            return self.ser.read_until(b"\r").decode().strip()
+
+    def _take_position(self, reply: str) -> bool:
+        """Record a position reply to ``live_position_um`` and report whether ``reply`` was one."""
+        if not re.fullmatch(r"-?\d+(\.\d+)?,-?\d+(\.\d+)?(,-?\d+(\.\d+)?)?", reply):
+            return False
+        x, y = reply.split(",")[:2]
+        self._live = (float(x), float(y))
+        self._pending = max(0, self._pending - 1)
+        return True
+
+    def _move(self, command: str, timeout: float = 300.0) -> None:
+        """Send a movement command and block until the controller replies ``R``.
+
+        Position replies requested by ``live_position_um`` while moving are
+        consumed here and not mistaken for the end-of-move reply.
+
+        Args:
+            command: Movement command without the terminator.
+            timeout: Maximum wait in seconds.
+
+        Raises:
+            RuntimeError: If the controller returns an error code.
+            TimeoutError: If no end-of-move reply arrives in time.
+        """
+        with self._lock:
+            self._moving = True
+            try:
+                self.ser.write(f"{command}\r".encode())
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    reply = self.ser.read_until(b"\r").decode().strip()
+                    if self._take_position(reply):
+                        continue
+                    if reply == "R" or self._abort.is_set():
+                        break
+                    if reply.startswith("E"):
+                        raise RuntimeError(f"Stage error: {reply}")
+                else:
+                    raise TimeoutError(f"No end-of-move reply for {command!r}")
+            finally:
+                with self._live_lock:
+                    self._moving = False
+            end = time.monotonic() + 0.1
+            while self._pending and time.monotonic() < end:
+                if self.ser.in_waiting:
+                    self._take_position(self.ser.read_until(b"\r").decode().strip())
+                else:
+                    time.sleep(0.005)
+            self._pending = 0
+
     @property
     def info(self) -> list[str]:
-        self.ser.write("STAGE\r".encode())
-        lines = self.ser.readlines()[0]
-        lines = lines.decode().split("\r")
-        return lines
-    
+        with self._lock:
+            self.ser.write("STAGE\r".encode())
+            lines = self.ser.readlines()[0]
+        return lines.decode().split("\r")
+
     @property
     def velocity(self) -> float:
-        """The maximum velocity of stage.
-
-        Returns:
-            float: in microns/s.
-        """
-        self.ser.write("SMS,u\r".encode())
-        return float(self.ser.read_until(b"\r").decode().strip())
+        """The maximum velocity of stage in microns/s."""
+        return float(self._query("SMS,u"))
 
     def is_close(
             self,
@@ -41,61 +109,99 @@ class ProScanStage:
             threshold: float = 10
         ) -> bool:
         """Check if two positions are close enough within a threshold."""
-        dx = abs(pos1[0] - pos2[0])
-        dy = abs(pos1[1] - pos2[1])
-        if dx < threshold and dy < threshold:
-            return True
-        return False
-    
+        return abs(pos1[0] - pos2[0]) < threshold and abs(pos1[1] - pos2[1]) < threshold
+
     @property
     def is_stop(self) -> bool:
-        pos1 = self.position
-        time.sleep(1e-2)
-        pos2 = self.position
-        if self.is_close(pos1, pos2):
-            return True
-        return False
-    
+        """Whether neither the X nor the Y axis is moving (``$,S`` status)."""
+        return self._query("$,S") == "0"
+
     def wait(self, max_time: float = 1):
-        i = 0
-        while not self.is_stop:
-            time.sleep(1e-2)
-            i += 1
-            if i >= max_time / 1e-2:
-                break
+        """Block until the stage stops or ``max_time`` seconds pass."""
+        deadline = time.monotonic() + max_time
+        while not self.is_stop and time.monotonic() < deadline:
+            time.sleep(self.wait_time)
 
     @property
     def position(self) -> tuple[float, float]:
-        """Return the current position of the stage as a tuple (x, y)."""
-        self.ser.write(b"P\r")
-        response = self.ser.read_until(b"\r").decode().strip()
-        if response[0] == "E":
-            return (-1, -1)
-        if "\r" in response:
-            response = response.split("\r")[-1]
-        x, y, _ = response.split(',')
+        """The current (x, y) position in controller user units.
+
+        Raises:
+            RuntimeError: If the controller returns an error.
+        """
+        reply = self._query("P")
+        if reply.startswith("E"):
+            raise RuntimeError(f"Stage error: {reply}")
+        x, y, _ = reply.split(",")
         return float(x), float(y)
 
+    @property
+    def position_um(self) -> tuple[float, float]:
+        """The current (x, y) position in microns."""
+        x, y = self.position
+        return x / self.units_per_um, y / self.units_per_um
+
+    @property
+    def live_position_um(self) -> tuple[float, float] | None:
+        """Position in microns that also works while a move is in progress.
+
+        During a move this asks the controller for ``P`` without waiting and
+        returns the latest reply received so far (``None`` before the first).
+        """
+        with self._live_lock:
+            if self._moving:
+                self._pending += 1
+                self.ser.write(b"P\r")
+                live = self._live
+                return None if live is None else (live[0] / self.units_per_um, live[1] / self.units_per_um)
+        return self.position_um
+
+    def read_units_per_um(self) -> float:
+        """Read the stage resolution (``RES,S``, microns per user unit) and set ``units_per_um``.
+
+        Returns:
+            Controller user units per micron.
+
+        Raises:
+            RuntimeError: If the reply is not a positive number.
+        """
+        reply = self._query("RES,S")
+        try:
+            resolution = float(reply)
+        except ValueError:
+            resolution = 0.0
+        if resolution <= 0:
+            raise RuntimeError(f"Unexpected RES,S reply: {reply!r}")
+        self.units_per_um = 1.0 / resolution
+        return self.units_per_um
+
+    def motion_profile(self) -> tuple[float, float]:
+        """Read the acceleration (``SAS,u``) and S-curve setting (``SCS``).
+
+        Returns:
+            Acceleration in microns/s^2 and the S-curve time per acceleration
+            change in seconds (the manual gives 13 ms at ``SCS`` 100 and 6.5 ms at 200,
+            so ``1.3 / SCS``).
+
+        Raises:
+            RuntimeError: If a reply is not numeric.
+        """
+        try:
+            return float(self._query("SAS,u")), 1.3 / float(self._query("SCS"))
+        except ValueError as exc:
+            raise RuntimeError(f"Unexpected SAS/SCS reply: {exc}") from exc
+
     def move_to(self, x: float, y: float):
-        """Move the stage to the specified (x, y) position."""
-        x, y = int(x), int(y)
-        command = f"G {x},{y}\r".encode()
-        self.ser.write(command)
-        response = self.ser.read_until(b"\r").decode().strip()
-        # if response != "R":
-        #     raise RuntimeWarning("Stage is not correctly moving!")
-        for _ in range(1000):
-            if response != "R":
-                time.sleep(1e-2)
-                response = self.ser.read_until(b"\r").decode().strip()
+        """Move to the absolute position (x, y) in user units."""
+        self._move(f"G {round(x)},{round(y)}")
+
+    def move_to_um(self, x: float, y: float):
+        """Move to the absolute position (x, y) in microns."""
+        self.move_to(x * self.units_per_um, y * self.units_per_um)
 
     def move_by(self, dx: float, dy: float):
-        dx, dy = int(dx), int(dy)
-        command = f"GR {dx},{dy}\r".encode()
-        self.ser.write(command)
-        response = self.ser.read_until(b"\r").decode().strip()
-        if response != "R":
-            raise RuntimeWarning("Stage is not correctly moving!")
+        """Move by (dx, dy) in user units."""
+        self._move(f"GR {round(dx)},{round(dy)}")
 
     def scan(
             self,
@@ -110,26 +216,47 @@ class ProScanStage:
                 time.sleep(intervals)
 
     def set_velocity(self, velocity: float):
-        """Set the maximum velocity of stage.
+        """Set the maximum velocity of stage in microns/s.
 
-        Args:
-            velocity (float): in microns/s.
+        Raises:
+            RuntimeWarning: If the controller rejects the value.
         """
-        message = f"SMS,{velocity},u\r".encode()
-        self.ser.write(message)
-        response = self.ser.read_until(b"\r").decode().strip()
-        if response != "0":
+        if self._query(f"SMS,{velocity},u") != "0":
             raise RuntimeWarning("Failed to set velocity!")
         self._velocity = velocity
+
+    def stop(self):
+        """Stop movement in a controlled way (``I``) and clear the command queue.
+
+        Safe to call from another thread while a move is in progress; the
+        blocked move returns and stale replies are discarded.
+        """
+        self._abort.set()
+        self.ser.write(b"I\r")
+        with self._lock:
+            time.sleep(0.05)
+            self.ser.reset_input_buffer()
+            self._pending = 0
+            self._abort.clear()
+
+    def standard_mode(self):
+        """Switch the controller to standard mode (``COMP,0``).
+
+        The previous mode is restored by ``close``.
+        """
+        self._comp = self._query("COMP")
+        if self._comp == "1":
+            self._query("COMP,0")
 
     def close(self):
         if not self.ser.is_open:
             return
-        message = "I\r".encode()
-        self.ser.write(message)
+        if self._comp == "1":
+            self._query("COMP,1")
+        self.ser.write("I\r".encode())
         time.sleep(0.1)
         self.ser.close()
 
     def __del__(self):
-        if self.ser.is_open:
+        if getattr(self, "ser", None) is not None and self.ser.is_open:
             self.close()
