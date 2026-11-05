@@ -8,6 +8,7 @@
   'use strict';
   const G = root.Geom;
   const NS = 'http://www.w3.org/2000/svg';
+  const PAN_LOCK_PX = 12, PAN_LOCK_RATIO = 2.5;
   const PICK_PX = 8, GRID_PX = 12, GHOST_PX = 16, ZOOM = [1e-4, 200];
   const INK = '#0b0b0b', RED = '#c0392b', BLUE = '#8b5a2b';
   const MIN_NODES = { polygon: 3, polyline: 2 };
@@ -415,24 +416,50 @@
 
     get transforming() { return !!this.xform; }
 
-    startTransform(mode, extrude) {
-      if (this.mode !== 'design' || this.xform || this.draft || this.locked) return;
+    /** What a modal transform or flip acts on: the selected nodes in Edit mode, else every contour of the selected shapes. */
+    transformItems() {
       let targets;
       if (this.editing) {
         targets = this.selNodes.size ? [[this.editing, this.editing.active, [...this.selNodes]]] : [];
       } else {
         targets = this.selectedShapes().flatMap((s) => s.contours.map((c, k) => [s, k, [...c.pts.keys()]]));
       }
-      if (!targets.length) { this.hooks.message('Select something first.', false); return; }
-      const items = targets.map(([s, k, idx]) => {
+      return targets.map(([s, k, idx]) => {
         const c = s.contours[k];
         return { s, k, idx, saved: { pts: c.pts.map((p) => p.slice()), hin: c.hin.map((q) => q && q.slice()), hout: c.hout.map((q) => q && q.slice()) } };
       });
+    }
+
+    /**
+     * Mirror the selection (shapes, or nodes in Edit mode) about the centre of its bounding box.
+     * 'h' swaps left and right on the screen, 'v' swaps top and bottom; the screen's horizontal axis is world Y.
+     */
+    flip(direction) {
+      if (this.mode !== 'design' || this.xform || this.draft || this.locked) return;
+      const items = this.transformItems();
+      if (!items.length) { this.hooks.message('Select something first.', false); return; }
+      const anchors = items.flatMap((it) => it.idx.map((i) => it.saved.pts[i]));
+      const axis = direction === 'h' ? 1 : 0;
+      const lo = Math.min(...anchors.map((p) => p[axis])), hi = Math.max(...anchors.map((p) => p[axis]));
+      const mirror = (p) => { const q = p.slice(); q[axis] = lo + hi - p[axis]; return q; };
+      for (const { s, k, idx, saved } of items) {
+        const c = s.contours[k];
+        for (const i of idx) {
+          c.pts[i] = mirror(saved.pts[i]);
+          c.hin[i] = saved.hin[i] && mirror(saved.hin[i]);
+          c.hout[i] = saved.hout[i] && mirror(saved.hout[i]);
+        }
+      }
+      this.commit();
+    }
+
+    startTransform(mode, extrude) {
+      if (this.mode !== 'design' || this.xform || this.draft || this.locked) return;
+      const items = this.transformItems();
+      if (!items.length) { this.hooks.message('Select something first.', false); return; }
       const anchors = items.flatMap((it) => it.idx.map((i) => it.saved.pts[i]));
       const pivot = [anchors.reduce((a, p) => a + p[0], 0) / anchors.length, anchors.reduce((a, p) => a + p[1], 0) / anchors.length];
       this.xform = { mode, items, pivot, start: this.s2w(...this.pointer), probe: anchors[0], axis: null, extrude: !!extrude };
-      this.hooks.message({ grab: 'Grab', rotate: 'Rotate', scale: 'Scale' }[mode] +
-        ': move the mouse, click or Enter to confirm, Esc or right-click to cancel, X / Y to lock an axis.', false);
     }
 
     setAxis(axis) {
@@ -754,11 +781,30 @@
         } else if (e.ctrlKey) {
           this.zoomAt(sp, Math.exp(-e.deltaY * 0.01)); // trackpad pinch
         } else {
-          this.view.ox -= e.deltaX; // trackpad two-finger scroll pans
-          this.view.oy -= e.deltaY;
+          const [dx, dy] = this.panDelta(e); // trackpad two-finger scroll pans
+          this.view.ox -= dx;
+          this.view.oy -= dy;
           this.render();
         }
       }, { passive: false });
+    }
+
+    /**
+     * Trackpad pan delta with an axis lock per gesture. Fingers never move perfectly straight, so a horizontal drag
+     * also reports a few pixels of vertical motion on most events and the picture wobbles. The first few pixels of a
+     * gesture decide whether it is mostly horizontal, mostly vertical or diagonal; a straight gesture then ignores the
+     * other axis until a pause of 120 ms ends it (inertia events after lifting the fingers belong to the same gesture).
+     */
+    panDelta(e) {
+      let g = this.panGesture;
+      if (!g || e.timeStamp - g.last > 120) g = this.panGesture = { axis: null, ax: 0, ay: 0, last: 0 };
+      g.last = e.timeStamp;
+      if (!g.axis) {
+        g.ax += Math.abs(e.deltaX);
+        g.ay += Math.abs(e.deltaY);
+        if (g.ax + g.ay >= PAN_LOCK_PX) g.axis = g.ax > g.ay * PAN_LOCK_RATIO ? 'x' : g.ay > g.ax * PAN_LOCK_RATIO ? 'y' : 'free';
+      }
+      return [g.axis === 'y' ? 0 : e.deltaX, g.axis === 'x' ? 0 : e.deltaY];
     }
 
     /** Trackpad pinch: `value` is the relative size change, (x, y) the pinch centre in page pixels. */

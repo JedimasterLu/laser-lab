@@ -36,7 +36,10 @@
       el.textContent = text || '';
       if (error !== undefined) el.classList.toggle('alert-error', !!error);
     };
-    const notice = (text, error) => show($('notice'), text, !!error);
+    /** Report a message in the Terminal panel (not above the canvas, whose size must not change). */
+    const notice = (text, error) => {
+      if (text) appendTraffic([[Date.now() / 1000, error ? '!' : '•', text, false]]);
+    };
 
     // ---- toolbar -----------------------------------------------------------------
     let canvas;
@@ -94,6 +97,8 @@
       pill('snap', 'Snap', 'Snap to the grid and to vertices (Shift+Tab)', () => toggleSnap(), { on: true }),
       pill('undo', 'Undo', 'Undo (Ctrl+Z)', () => canvas.undo()),
       pill('redo', 'Redo', 'Redo (Ctrl+Shift+Z)', () => canvas.redo()),
+      pill('flipH', 'Flip H', 'Mirror the selection left-right on the screen; selected nodes in Edit mode (Shift+H)', () => canvas.flip('h')),
+      pill('flipV', 'Flip V', 'Mirror the selection top-bottom on the screen; selected nodes in Edit mode (Shift+V)', () => canvas.flip('v')),
       pill('delete', 'Delete', 'Delete selected shapes (Delete)', () => canvas.deleteSelected()),
     ]);
     const chooseOp = (op) => { if (app.mode === 'design') { canvas.setNewOp(op); radio(['add', 'subtract', 'merge'], op); } };
@@ -273,7 +278,7 @@
     const pad = (n, w = 2) => String(n).padStart(w, '0');
     const stamp = (t) => { const d = new Date(t * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`; };
     function appendTraffic(rows) {
-      const mon = $('monitor'), hide = buttons.hidePoll.classList.contains('on');
+      const mon = $('monitor'), hide = !!buttons.hidePoll && buttons.hidePoll.classList.contains('on');
       const lines = rows.filter((r) => !(r[3] && hide));
       if (!lines.length) return;
       const atEnd = mon.scrollTop + mon.clientHeight >= mon.scrollHeight - 4;
@@ -295,7 +300,9 @@
       app.running = s.running;
       $('connect').textContent = s.connected ? 'Disconnect' : 'Connect';
       $('connect').disabled = false;
-      show($('device-status'), s.connected ? (s.simulated ? 'Simulated devices connected' : 'Hardware devices connected') : 'Not connected');
+      const status = s.connected ? (s.simulated ? 'Simulated devices connected' : 'Hardware devices connected') : 'Not connected';
+      $('device-led').classList.toggle('on', s.connected);
+      $('device-led').title = status;
       if (!cfg.simulate) { stagePort.setDisabled(s.connected); shutterPort.setDisabled(s.connected); }
 
       const key = JSON.stringify(s.profile);
@@ -334,14 +341,117 @@
       canvas.fit();
       notice(r.differs ? 'The project was drawn for a different stage range than the connected stage.' : '', true);
     }
-    async function saveProject() {
-      const r = await call('saveProject', JSON.stringify(canvas.dicts()), JSON.stringify(params()));
-      if (r) notice(r, true);
+    async function saveProject(saveAs) {
+      const r = JSON.parse(await call('saveProject', JSON.stringify(canvas.dicts()), JSON.stringify(params()), !!saveAs));
+      if (r.error) notice(r.error, true);
+      else if (r.name) notice('Saved ' + r.name + '.', false);
     }
+    async function importDrawing() {
+      if (app.running || app.mode !== 'design') { notice('Switch to Design (and stop any run) to import.', true); return; }
+      const r = JSON.parse(await call('importDrawing'));
+      if (r.cancelled) return;
+      if (r.error) { notice(r.error, true); return; }
+      canvas.setShapes(canvas.dicts().concat(r.shapes), true);
+      canvas.fit();
+      notice(r.message + ' Move or scale with G / S.', false);
+    }
+    async function importBitmap() {
+      if (app.running || app.mode !== 'design') { notice('Switch to Design (and stop any run) to import.', true); return; }
+      if (document.querySelector('.modal-back')) return;
+      const r = JSON.parse(await call('openBitmap'));
+      if (r.cancelled) return;
+      if (r.error) { notice(r.error, true); return; }
+      // Grey values for the live preview (the same pixels Python traces).
+      const img = new Image();
+      await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = r.png; });
+      const view = document.createElement('canvas');
+      view.width = r.w; view.height = r.h;
+      const vctx = view.getContext('2d', { willReadFrequently: true });
+      vctx.drawImage(img, 0, 0);
+      const grey = vctx.getImageData(0, 0, r.w, r.h);
+      const out = vctx.createImageData(r.w, r.h);
+
+      const back = document.createElement('div');
+      back.className = 'modal-back bitmap';
+      back.innerHTML = `<div class="modal bitmap-dialog" role="dialog" aria-label="Import bitmap">
+        <div class="card-head"><h2>Import bitmap</h2><span class="muted small" id="bm-name"></span></div>
+        <div class="bitmap-body">
+          <div class="bitmap-preview"></div>
+          <div class="bitmap-controls">
+            <div class="field"><label class="field-label">Threshold <span class="muted" id="bm-th-val"></span></label>
+              <div class="row"><input id="bm-th" type="range" min="1" max="255" step="1"><button class="btn compact" id="bm-auto" type="button">Auto</button></div></div>
+            <label class="check"><input id="bm-invert" type="checkbox"> Scan the bright parts</label>
+            <div class="field"><label class="field-label">Width on stage (µm)</label><input class="input" id="bm-width" type="number" min="1" step="any" value="1000"><div class="muted small" id="bm-size"></div></div>
+            <div class="field"><label class="field-label">Remove specks up to (px)</label><input class="input" id="bm-speck" type="number" min="0" step="1" value="4"></div>
+            <div class="field"><label class="field-label">Smoothness <span class="muted" id="bm-sm-val"></span></label><input id="bm-smooth" type="range" min="0" max="1.33" step="0.01" value="1"></div>
+            <div class="muted small">The preview shows the threshold only; specks and smoothness apply when importing.</div>
+          </div>
+        </div>
+        <div class="alert alert-error" id="bm-error"></div>
+        <div class="actions"><button class="btn" id="bm-cancel" type="button">Cancel</button><button class="btn btn-primary" id="bm-ok" type="button">Import</button></div>
+      </div>`;
+      document.body.append(back);
+      const q = (id) => back.querySelector('#' + id);
+      back.querySelector('.bitmap-preview').append(view);
+      q('bm-name').textContent = r.name;
+      q('bm-th').value = r.otsu;
+
+      const [onR, onG, onB] = [245, 184, 0];
+      function draw() {
+        const th = +q('bm-th').value, invert = q('bm-invert').checked;
+        q('bm-th-val').textContent = th;
+        q('bm-sm-val').textContent = (+q('bm-smooth').value).toFixed(2);
+        const src = grey.data, dst = out.data;
+        for (let i = 0; i < src.length; i += 4) {
+          const on = invert ? src[i] >= th : src[i] < th;
+          dst[i] = on ? onR : 236; dst[i + 1] = on ? onG : 238; dst[i + 2] = on ? onB : 241; dst[i + 3] = 255;
+        }
+        vctx.putImageData(out, 0, 0);
+        const w = +q('bm-width').value;
+        q('bm-size').textContent = w > 0 ? `${w} × ${(w * r.h / r.w).toFixed(1)} µm · ${(w / r.w).toFixed(3)} µm/px` : '';
+      }
+      const close = () => { back.remove(); call('closeBitmap'); };
+      ['bm-th', 'bm-invert', 'bm-width', 'bm-smooth'].forEach((id) => q(id).addEventListener('input', draw));
+      q('bm-auto').addEventListener('click', () => { q('bm-th').value = r.otsu; draw(); });
+      q('bm-cancel').addEventListener('click', close);
+      back.addEventListener('pointerdown', (e) => { if (e.target === back) close(); });
+      back.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+      q('bm-ok').addEventListener('click', async () => {
+        q('bm-ok').disabled = true;
+        q('bm-ok').textContent = 'Tracing…';
+        await new Promise((resolve) => setTimeout(resolve, 30)); // let the button repaint before the blocking call
+        const t = JSON.parse(await call('traceBitmap', JSON.stringify({
+          threshold: +q('bm-th').value, invert: q('bm-invert').checked, width: +q('bm-width').value,
+          speckle: +q('bm-speck').value, smooth: +q('bm-smooth').value,
+        })));
+        if (t.error) { show(q('bm-error'), t.error, true); q('bm-ok').disabled = false; q('bm-ok').textContent = 'Import'; return; }
+        close();
+        canvas.setShapes(canvas.dicts().concat(t.shapes), true);
+        canvas.fit();
+        notice(t.message + ' Move or scale with G / S.', false);
+      });
+      draw();
+      q('bm-ok').focus();
+    }
+    async function exportPlan() {
+      const r = JSON.parse(await call('exportPlan', JSON.stringify(canvas.dicts()), JSON.stringify(params())));
+      if (r.error) notice(r.error, true);
+      else if (r.name) notice('Exported ' + r.name + ' (coordinates relative to the start position).', false);
+    }
+    const FILE_ACTIONS = { open: openProject, import: importDrawing, bitmap: importBitmap, save: () => saveProject(false), saveas: () => saveProject(true), export: exportPlan };
     new UI.Dropdown($('files-menu'), {
       menu: true, label: 'Files',
-      options: [{ label: 'Open…', value: 'open', kbd: combo('Mod+O') }, { label: 'Save…', value: 'save', kbd: combo('Mod+S') }],
-      onChange: (v) => (v === 'open' ? openProject() : saveProject()),
+      options: [
+        { label: 'Open project…', value: 'open', kbd: combo('Mod+O') },
+        { label: 'Import drawing…', value: 'import', kbd: combo('Mod+Shift+I') },
+        { label: 'Import bitmap…', value: 'bitmap', kbd: combo('Mod+Shift+B') },
+        { sep: true },
+        { label: 'Save', value: 'save', kbd: combo('Mod+S') },
+        { label: 'Save as…', value: 'saveas', kbd: combo('Mod+Shift+S') },
+        { sep: true },
+        { label: 'Export path…', value: 'export', kbd: combo('Mod+Shift+E') },
+      ],
+      onChange: (v) => FILE_ACTIONS[v](),
     });
 
     // ---- shortcut guide --------------------------------------------------------------------
@@ -350,13 +460,14 @@
       ['Draw', [['W', 'Switch Select / Bézier pen'], ['Shift+A', 'Bézier pen'], ['Click, drag', 'Place a node, pull its handles'], ['Click first node', 'Close the path'], ['Enter, double-click, right-click', 'Finish the path'], ['Esc', 'Cancel']]],
       ['Mode and nodes', [['Tab', 'Object / Edit mode'], ['1 / 2 / 3 / 4', 'Node type: Sharp, Free, Smooth, Symmetric (pen and Edit)'], ['Double-click edge', 'Add a node (Edit)'], ['Alt+drag handle', 'Break a Smooth node (Edit)'], ['E', 'Extrude the selected nodes (Edit)']]],
       ['Region', [['Alt+1 / Alt+2', 'New shapes add / subtract area'], ['Alt+3', 'Merge: fuse the selected shapes, or merge new shapes as drawn'], ['Shift+X', 'Invert Add / Subtract']]],
-      ['Selection and edit', [['A / Alt+A', 'Select all / none'], ['Mod+I', 'Invert the selection'], ['Shift+D', 'Duplicate'], ['Delete / X / Backspace', 'Delete'], ['Mod+Z / Mod+Shift+Z', 'Undo / redo'], ['Shift+Tab', 'Snap on / off']]],
+      ['Selection and edit', [['A / Alt+A', 'Select all / none'], ['Shift+H / Shift+V', 'Flip left-right / top-bottom (nodes in Edit)'], ['Mod+I', 'Invert the selection'], ['Shift+D', 'Duplicate'], ['Delete / X / Backspace', 'Delete'], ['Mod+Z / Mod+Shift+Z', 'Undo / redo'], ['Shift+Tab', 'Snap on / off']]],
       ['Transform', [['G / R / S', 'Grab / rotate / scale'], ['X / Y', 'Lock to an axis'], ['Click, Enter', 'Confirm'], ['Right-click, Esc', 'Cancel']]],
       ['Mouse and trackpad', [['Wheel', `Zoom (${SYMBOL.Shift} / ${SYMBOL.Ctrl}: pan)`], ['Middle-drag', 'Pan'], ['Two-finger scroll', 'Pan'], ['Pinch', 'Zoom'], ['Press and drag', 'Box select']]],
-      ['Files', [['Mod+O / Mod+S', 'Open / save'], ['?', 'This guide']]],
+      ['Files', [['Mod+O / Mod+S', 'Open / save'], ['Mod+Shift+S', 'Save as'], ['Mod+Shift+I', 'Import drawing: SVG, DXF, GDSII or CSV'], ['Mod+Shift+B', 'Import bitmap: PNG, JPEG, TIFF or WebP'], ['Mod+Shift+E', 'Export path: CSV, G-code or NPZ'], ['Mod+/', 'This guide']]],
     ];
     function closeGuide() { const g = document.querySelector('.modal-back'); if (g) g.remove(); }
     function toggleGuide() {
+      if (document.querySelector('.modal-back.bitmap')) return;
       if (document.querySelector('.modal-back')) { closeGuide(); return; }
       const back = document.createElement('div');
       back.className = 'modal-back';
@@ -367,17 +478,22 @@
       document.body.append(back);
       back.querySelector('#guide-close').addEventListener('click', closeGuide);
     }
+    $('guide-link').innerHTML = `Shortcuts <kbd>${combo('Mod+/')}</kbd>`;
+    $('guide-link').title = `Keyboard shortcuts (${combo('Mod+/')})`;
     $('guide-link').addEventListener('click', toggleGuide);
 
     // ---- keyboard ----------------------------------------------------------------------
     window.addEventListener('keydown', (e) => {
       if (/INPUT|TEXTAREA/.test(e.target.tagName)) return;
       if (e.key === 'Escape' && document.querySelector('.modal-back')) { closeGuide(); return; }
-      if (e.key === '?') { e.preventDefault(); toggleGuide(); return; }
-      if (document.querySelector('.modal-back')) return;
       const mod = e.ctrlKey || e.metaKey, code = e.code;
+      if (mod && !e.shiftKey && !e.altKey && (code === 'Slash' || e.key === '/')) { e.preventDefault(); toggleGuide(); return; }
+      if (document.querySelector('.modal-back')) return;
       if (mod && code === 'KeyO') { e.preventDefault(); openProject(); return; }
-      if (mod && code === 'KeyS') { e.preventDefault(); saveProject(); return; }
+      if (mod && code === 'KeyS') { e.preventDefault(); saveProject(e.shiftKey); return; }
+      if (mod && e.shiftKey && code === 'KeyI') { e.preventDefault(); importDrawing(); return; }
+      if (mod && e.shiftKey && code === 'KeyB') { e.preventDefault(); importBitmap(); return; }
+      if (mod && e.shiftKey && code === 'KeyE') { e.preventDefault(); exportPlan(); return; }
       if (mod && code === 'Digit1') { e.preventDefault(); setView('design'); return; }
       if (mod && code === 'Digit2') { e.preventDefault(); setView('preview'); return; }
       if (mod && code === 'KeyZ') { e.preventDefault(); e.shiftKey ? canvas.redo() : canvas.undo(); return; }
@@ -398,6 +514,7 @@
       }
       if (e.shiftKey && code === 'KeyA') return done(() => buttons.pen.click());
       if (e.shiftKey && code === 'KeyD') return done(() => canvas.duplicate());
+      if (e.shiftKey && (code === 'KeyH' || code === 'KeyV')) return done(() => canvas.flip(code === 'KeyH' ? 'h' : 'v'));
       if (e.shiftKey && code === 'KeyX') return done(() => canvas.invertOp());
       switch (code) {
         case 'KeyW': return done(() => canvas.pickTool());

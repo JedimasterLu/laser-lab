@@ -16,14 +16,17 @@
   <div class="layout">
     <aside class="sidebar">
       <section class="card">
-        <h2>Devices</h2>
+        <div class="card-head">
+          <h2>Devices</h2>
+          <span class="grow-space"></span>
+          <div class="row">
+            <span class="led ok" id="device-led" title="Not connected"></span>
+            <button class="btn" id="connect">Connect</button>
+          </div>
+        </div>
         <div class="stack">
           <div class="field"><label class="field-label">Stage port</label><div class="dd" id="stage-port"></div></div>
           <div class="field"><label class="field-label">Shutter port</label><div class="dd" id="shutter-port"></div></div>
-          <div class="actions">
-            <button class="btn" id="connect">Connect</button>
-            <span class="muted small" id="device-status">Not connected</span>
-          </div>
         </div>
         <div class="alert alert-error" id="device-msg"></div>
       </section>
@@ -43,7 +46,7 @@
 
       <section class="card">
         <div class="card-head">
-          <h2>Monitor</h2>
+          <h2>Terminal</h2>
           <div class="pills pills-compact">
             <button class="pill on" id="hide-poll" title="Hide the position polling commands">Hide P / $,S polling</button>
             <button class="pill" id="clear-monitor">Clear</button>
@@ -68,9 +71,8 @@
         </div>
         <div class="progress-row"><span class="muted small" id="status">Idle</span><div class="progress"><i id="progress"></i></div></div>
         <div class="muted small" id="estimate"></div>
-        <div class="toolbar" id="toolbar"><button class="hint-link" id="guide-link" title="Keyboard shortcuts (?)">Shortcuts <kbd>?</kbd></button></div>
+        <div class="toolbar" id="toolbar"><button class="hint-link" id="guide-link" title="Keyboard shortcuts (Mod+/)">Shortcuts <kbd>Ctrl+/</kbd></button></div>
         <div class="alert alert-error" id="alerts"></div>
-        <div class="alert" id="notice"></div>
         <div class="stage-wrap" id="stage-wrap"></div>
         <div class="cursor-label" id="cursor"></div>
       </section>

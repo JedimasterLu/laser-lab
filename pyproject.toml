@@ -19,9 +19,14 @@ rl = [
     "trackpy>=0.7",
 ]
 scan = [
+    "ezdxf>=1.4.5",
+    "gdstk>=1.0.2",
+    "pillow>=12.2.0",
+    "potracer>=0.0.4",
     "pyside6>=6.7",
     "shapely>=2.1.2",
     "skia-python>=138",
+    "svgelements>=1.9.6",
 ]
 
 [project.scripts]
@@ -34,6 +39,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/laserlab", "src/laserscan"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/assets" = "laserscan/assets"
 
 [dependency-groups]
 dev = [

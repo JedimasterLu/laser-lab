@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QUrl, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, QRectF, QUrl, Qt
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -16,6 +17,34 @@ from laserscan.bridge import Bridge
 from laserscan.session import SESSION
 
 WEB_DIR = Path(__file__).parent / "web"
+
+
+def app_icon() -> QIcon | None:
+    """Load the application icon (``assets/icon.svg``), or ``None`` if missing.
+
+    macOS draws a dock icon edge to edge, so a full-bleed icon looks larger than
+    other apps. There the artwork is scaled into the standard 824/1024 body.
+    """
+    here = Path(__file__).resolve().parent
+    for path in (here.parent / "assets" / "icon.svg", here / "assets" / "icon.svg"):
+        if path.is_file():
+            break
+    else:
+        return None
+    if sys.platform != "darwin":
+        return QIcon(str(path))
+    renderer = QSvgRenderer(str(path))
+    icon = QIcon()
+    for size in (16, 32, 64, 128, 256, 512, 1024):
+        image = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        margin = size * 100 / 1024
+        renderer.render(painter, QRectF(margin, margin, size - 2 * margin, size - 2 * margin))
+        painter.end()
+        icon.addPixmap(QPixmap.fromImage(image))
+    return icon
 
 
 class Page(QWebEnginePage):
@@ -37,6 +66,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.s = SESSION
         self.setWindowTitle("LaserScan")
+        icon = app_icon()
+        if icon is not None:
+            self.setWindowIcon(icon)
         height = min(860, self.screen().availableGeometry().height() - 40)
         self.resize(1360, height)
         self.setMinimumSize(1100, 640)

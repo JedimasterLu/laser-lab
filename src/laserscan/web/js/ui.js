@@ -11,7 +11,7 @@
 
   /**
    * A dropdown (a select, or with `menu: true` a menu of actions).
-   * options: [{label, value, kbd}]; onChange(value).
+   * options: [{label, value, kbd} or {sep: true}]; onChange(value).
    */
   class Dropdown {
     constructor(el, { options = [], value = null, onChange = () => {}, menu = false, label = '' } = {}) {
@@ -33,6 +33,7 @@
       if (value !== undefined) this.value = value;
       this.content.innerHTML = '';
       for (const o of options) {
+        if (o.sep) { const hr = document.createElement('div'); hr.className = 'dd-sep'; this.content.append(hr); continue; }
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'dd-option' + (!this.menu && o.value === this.value ? ' sel' : '');

@@ -23,10 +23,14 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     from PySide6.QtWidgets import QApplication
 
-    from laserscan.main_window import MainWindow
+    from laserscan.main_window import MainWindow, app_icon
     from laserscan.session import SESSION
 
     app = QApplication(sys.argv[:1])
+    app.setApplicationName("LaserScan")
+    icon = app_icon()
+    if icon is not None:
+        app.setWindowIcon(icon)
     app.aboutToQuit.connect(lambda: SESSION.shutdown("application quit"))
     signal.signal(signal.SIGINT, lambda *_: app.quit())
     window = MainWindow(simulate=args.simulate)

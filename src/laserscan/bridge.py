@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import sys
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtWidgets import QFileDialog
 
-from laserscan import __version__, project, settings, shapeops
+from laserscan import __version__, fileio, project, settings, shapeops
 from laserscan.devices import HARDWARE_AVAILABLE, serial_ports
 from laserscan.executor import State
 from laserscan.planning import (
@@ -28,6 +31,10 @@ from laserscan.session import SESSION
 DEFAULT_PORTS = ("COM3", "COM6")
 """Default (stage, shutter) serial ports of the lab machine."""
 PUSH_MS = 100
+PROJECT_FILTER = "LaserScan project (*.laserscan.json *.json)"
+IMPORT_FILTER = "Drawings (*.svg *.dxf *.gds *.gds2 *.gdsii *.csv);;SVG (*.svg);;DXF (*.dxf);;GDSII (*.gds *.gds2 *.gdsii);;CSV points (*.csv)"
+BITMAP_FILTER = "Images (*.png *.jpg *.jpeg *.tif *.tiff *.webp)"
+EXPORT_TYPES = {"CSV (*.csv)": ".csv", "G-code (*.gcode)": ".gcode", "NumPy archive (*.npz)": ".npz"}
 
 
 def _duration(seconds: float) -> str:
@@ -47,6 +54,8 @@ class Bridge(QObject):
         self.s = SESSION
         self.simulate = simulate or not HARDWARE_AVAILABLE
         self.profile = settings.load()
+        self.path: Path | None = None
+        self.bitmap = None  # grey array of the bitmap being imported
         self.origin: tuple[float, float] = (0.0, 0.0)
         self.motion: tuple[float, float] | None = None
         self.can_start = False
@@ -202,33 +211,135 @@ class Bridge(QObject):
         self.s.executor.abort("Aborted by user")
         return ""
 
+    def _titled(self, path: str | None) -> None:
+        """Remember the current project file and show its name in the window title."""
+        self.path = Path(path) if path else None
+        self.window.setWindowTitle(f"{self.path.name} — LaserScan" if self.path else "LaserScan")
+
+    @staticmethod
+    def _with_suffix(path: str, chosen_filter: str, suffixes: dict[str, str]) -> str:
+        """Add the suffix of the selected file type unless the name already has one of the known suffixes."""
+        name = path.lower()
+        if any(name.endswith(suffix) for suffix in suffixes.values()):
+            return path
+        return path + next((suffix for label, suffix in suffixes.items() if label == chosen_filter), next(iter(suffixes.values())))
+
     @Slot(result=str)
     def openProject(self) -> str:
-        path, _ = QFileDialog.getOpenFileName(self.window, "Open project", "", "LaserScan project (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self.window, "Open project", self._dir(), PROJECT_FILTER)
         if not path:
             return json.dumps({"cancelled": True})
         try:
-            with open(path, encoding="utf-8") as f:
-                shapes, params, file_profile = project.loads(f.read())
+            shapes, params, file_profile = project.load(path)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return json.dumps({"error": str(exc)})
+        self._titled(path)
         differs = bool(file_profile) and (
             file_profile.get("x_range_um") != self.profile["x_range_um"]
             or file_profile.get("y_range_um") != self.profile["y_range_um"]
         )
         return json.dumps({"shapes": shapes, "params": asdict(params), "differs": differs})
 
-    @Slot(str, str, result=str)
-    def saveProject(self, shapes: str, params: str) -> str:
-        path, _ = QFileDialog.getSaveFileName(self.window, "Save project", "scan.laserscan.json", "LaserScan project (*.json)")
-        if not path:
-            return ""
+    @Slot(str, str, bool, result=str)
+    def saveProject(self, shapes: str, params: str, save_as: bool) -> str:
+        """Save to the current file, or ask for one (always when ``save_as``). Returns JSON with ``error`` or ``name``."""
+        path = None if save_as or self.path is None else str(self.path)
+        if path is None:
+            default = str(Path(self._dir()) / (self.path.name if self.path else "scan.laserscan.json"))
+            path, _ = QFileDialog.getSaveFileName(self.window, "Save project", default, PROJECT_FILTER)
+            if not path:
+                return json.dumps({"cancelled": True})
+            if not path.lower().endswith(".json"):
+                path += ".laserscan.json"
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(project.dumps(json.loads(shapes), self._params(json.loads(params)), self.profile))
+            project.save(path, json.loads(shapes), self._params(json.loads(params)), self.profile)
         except OSError as exc:
-            return f"Cannot save project: {exc}"
+            return json.dumps({"error": f"Cannot save project: {exc}"})
+        self._titled(path)
+        return json.dumps({"name": Path(path).name})
+
+    @Slot(result=str)
+    def importDrawing(self) -> str:
+        """Ask for an SVG, DXF or CSV file and return its shapes (the page adds them to the drawing)."""
+        path, _ = QFileDialog.getOpenFileName(self.window, "Import drawing", self._dir(), IMPORT_FILTER)
+        if not path:
+            return json.dumps({"cancelled": True})
+        try:
+            result = fileio.import_shapes(path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"shapes": result.shapes, "message": result.message})
+
+    @Slot(result=str)
+    def openBitmap(self) -> str:
+        """Ask for an image, keep its grey values for tracing, and return a PNG preview with the Otsu threshold."""
+        from PIL import Image
+
+        path, _ = QFileDialog.getOpenFileName(self.window, "Import bitmap", self._dir(), BITMAP_FILTER)
+        if not path:
+            return json.dumps({"cancelled": True})
+        try:
+            gray = fileio.load_bitmap(path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": str(exc)})
+        self.bitmap = gray
+        buffer = io.BytesIO()
+        Image.fromarray(gray).save(buffer, "PNG")
+        return json.dumps(
+            {
+                "name": Path(path).name,
+                "w": int(gray.shape[1]),
+                "h": int(gray.shape[0]),
+                "otsu": fileio.otsu_threshold(gray),
+                "png": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode(),
+            }
+        )
+
+    @Slot(str, result=str)
+    def traceBitmap(self, options: str) -> str:
+        """Trace the bitmap from ``openBitmap`` with the dialog's settings and return the shapes."""
+        if self.bitmap is None:
+            return json.dumps({"error": "No bitmap is open."})
+        o = json.loads(options)
+        try:
+            result = fileio.trace_bitmap(
+                self.bitmap, int(o["threshold"]), bool(o["invert"]), float(o["width"]), int(o["speckle"]), float(o["smooth"])
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps({"shapes": result.shapes, "message": result.message + "."})
+
+    @Slot(result=str)
+    def closeBitmap(self) -> str:
+        self.bitmap = None
         return ""
+
+    @Slot(str, str, result=str)
+    def exportPlan(self, shapes: str, params: str) -> str:
+        """Ask for a file name and write the scan path (CSV, G-code or NPZ, relative to the start position)."""
+        parsed = self._params(json.loads(params))
+        try:
+            plan = build_plan([clean_shape(d) for d in json.loads(shapes)], parsed)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        if not plan:
+            return json.dumps({"error": "Nothing to export: draw a shape first."})
+        stem = self.path.name.removesuffix(".json").removesuffix(".laserscan") if self.path else "scan"
+        path, chosen = QFileDialog.getSaveFileName(
+            self.window, "Export scan path", str(Path(self._dir()) / f"{stem}.csv"), ";;".join(EXPORT_TYPES)
+        )
+        if not path:
+            return json.dumps({"cancelled": True})
+        path = self._with_suffix(path, chosen, EXPORT_TYPES)
+        try:
+            fileio.export_plan(plan, parsed, path)
+        except (OSError, ValueError) as exc:
+            return json.dumps({"error": f"Cannot export: {exc}"})
+        return json.dumps({"name": Path(path).name})
+
+    def _dir(self) -> str:
+        """Folder the file dialogs start in: the current project's folder, else the user's home."""
+        return str(self.path.parent) if self.path else str(Path.home())
 
     @Slot(str, int, result=str)
     def merge(self, shapes: str, index: int) -> str:
