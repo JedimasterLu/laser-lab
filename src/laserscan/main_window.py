@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import asdict
 
@@ -209,6 +208,8 @@ class MainWindow(QMainWindow):
         if self.simulate:
             self.s.devices.connect(simulate=True, start=self._stage_center())
         self._after_connect()
+        if not self.simulate:
+            QTimer.singleShot(200, self._connect)  # after the window is shown
 
     def _stage_center(self) -> tuple[float, float]:
         (x0, x1), (y0, y1) = self.profile["x_range_um"], self.profile["y_range_um"]
@@ -690,7 +691,8 @@ class MainWindow(QMainWindow):
         _show(self.notice, "", False)
         if not s.devices.connected:
             return _show(self.notice, "Connect the devices first.", True)
-        self._refresh_origin()
+        if self.view_mode == "design":  # the preview already fixed the origin the path was shown at
+            self._refresh_origin()
         self.replan()
         if s.problems or not s.plan:
             return _show(self.notice, "Nothing to scan, or the plan leaves the stage range.", True)
@@ -739,12 +741,7 @@ class MainWindow(QMainWindow):
             self._finish_run()
             self.canvas.set_marker(dev.position)
         elif self.view_mode == "preview":
-            position = dev.position
-            self.canvas.set_marker(position)
-            if position and not dev.simulated and math.dist(position, self.origin) > 0.5:
-                # Real stage: the serial-reported position is the origin (the joystick may move it).
-                self.origin = position
-                self.replan()
+            self.canvas.set_marker(dev.position)
         self._was_running = running
 
     def _update_led(self, on: bool) -> None:

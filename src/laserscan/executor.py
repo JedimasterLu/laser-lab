@@ -149,5 +149,7 @@ class Executor:
             self._laser_on = False
             try:
                 self._set_shutter(False)
+            except Exception as exc:
+                self.message = f"{self.message} (shutter: {exc})".strip()
             finally:
                 self.state = State.IDLE

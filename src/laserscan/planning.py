@@ -10,7 +10,7 @@ from shapely import affinity
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
 
-PATTERNS = ("serpentine", "raster", "contour", "outline")
+PATTERNS = ("serpentine", "raster", "outline")
 SHAPE_KEYS = ("type", "x0", "y0", "x1", "y1", "path", "op")
 SIMPLIFY_UM = 0.5
 _TOKEN = re.compile(r"[MLCZmlcz]|-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
@@ -22,7 +22,7 @@ class Params:
 
     Attributes:
         pattern: One of ``PATTERNS``; applies to closed shapes only.
-        step: Distance between scan lines or contour rings in microns.
+        step: Distance between scan lines in microns.
         angle: Scan line angle in degrees from the x axis.
         speed: Stage speed in microns/s.
         margin: Inset from the shape boundary in microns.
@@ -212,17 +212,6 @@ def _join(lines: list[np.ndarray], region: Polygon) -> list[np.ndarray]:
     return joined
 
 
-def _contours(region: Polygon, step: float) -> list[np.ndarray]:
-    out, inset = [], 0.0
-    while True:
-        ring = region.buffer(-inset)
-        if ring.is_empty:
-            return out
-        for part in getattr(ring, "geoms", [ring]):
-            out += [np.asarray(r.coords) for r in (part.exterior, *part.interiors)]
-        inset += step
-
-
 def _polygons(geom) -> list[Polygon]:
     return [g for g in getattr(geom, "geoms", [geom]) if g.geom_type == "Polygon" and not g.is_empty]
 
@@ -279,8 +268,6 @@ def build_plan(shapes: list[dict], params: Params) -> list[Segment]:
         if not region.is_empty:
             if params.pattern == "outline":
                 arrays += [np.asarray(r.coords) for p in _polygons(region) for r in (p.exterior, *p.interiors)]
-            elif params.pattern == "contour":
-                arrays += _contours(region, params.step)
             else:
                 lines = _hatch(region, params.step, params.angle, params.pattern == "serpentine")
                 arrays += _join(lines, region) if lines and params.pattern == "serpentine" else lines

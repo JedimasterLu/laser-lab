@@ -1,11 +1,15 @@
-import serial
+import threading
 import time
+import warnings
+
+import serial
 from typing import Literal
 
 class SC30Shutter:
     def __init__(self, port: str):
         """The SC30 shutter control instance."""
         # 1. Open the port
+        self._lock = threading.RLock()
         self.ser = serial.Serial(port, baudrate=115200, timeout=1)
         
         # 2. WAIT for the controller to boot up / stabilize after serial connection
@@ -22,12 +26,13 @@ class SC30Shutter:
 
     def _send_cmd(self, cmd: str) -> str:
         """Helper to safely send a command, read the response, and warn on timeouts."""
-        self.ser.write(cmd.encode())
-        response = self.ser.read_until(b">").decode().strip()
-        
+        with self._lock:
+            self.ser.write(cmd.encode())
+            response = self.ser.read_until(b">").decode(errors="replace").strip()
+
         if not response:
-            print(f"⚠️ Shutter Timeout: No response received for command '{cmd.strip()}'")
-            
+            warnings.warn(f"Shutter timeout: no response to {cmd.strip()!r}", RuntimeWarning, stacklevel=2)
+
         return response
 
     def unlock(self):

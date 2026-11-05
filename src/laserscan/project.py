@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
-from laserscan.planning import Params, clean_shape
+from laserscan.planning import PATTERNS, Params, clean_shape
 
 VERSION = 1
 
@@ -50,4 +50,7 @@ def loads(text: str) -> tuple[list[dict], Params, dict[str, Any]]:
     data = json.loads(text)
     if data.get("version", 0) > VERSION or data.get("units") != "um" or data.get("coordinates") != "relative":
         raise ValueError("Unsupported project file version, units or coordinates.")
-    return data["shapes"], Params(**data["params"]), data.get("stage_profile", {})
+    params = Params(**data["params"])
+    if params.pattern not in PATTERNS:  # e.g. the removed "contour" pattern
+        params = replace(params, pattern=Params().pattern)
+    return data["shapes"], params, data.get("stage_profile", {})
