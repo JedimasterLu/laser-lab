@@ -1116,3 +1116,25 @@ This package also includes wrappers for:
 - serial port helper `print_ports` (`laserlab.utils`)
 
 Camera and SLM usage above are the documented paths for the refactored Nikon DS-Fi3 and Thorlabs EXULUS integrations.
+
+---
+
+## LaserScan for Windows
+
+Releases are built by GitHub Actions ([build-windows.yml](.github/workflows/build-windows.yml)). Pushing a
+tag such as `v0.1.0` (it must match `laserscan.__version__`) builds a one-folder PyInstaller bundle,
+smoke-tests it (`LaserScan.exe --self-test` imports every lazily loaded module and loads the web UI in
+QtWebEngine), and attaches `LaserScan-<version>-windows-x64.zip` to the GitHub Release. Run the workflow
+manually to get the zip as a build artifact.
+
+To build locally on Windows:
+
+```powershell
+uv sync --no-dev --extra scan --group build
+uv run --no-sync pyinstaller packaging/laserscan.spec --noconfirm   # output: dist/LaserScan/
+```
+
+Unzip and run `LaserScan.exe`. The windowed build has no console; console output and startup errors go to
+`%LOCALAPPDATA%\LaserScan\laserscan.log`. Size is kept down by excluding unused packages and Qt parts in
+[packaging/laserscan.spec](packaging/laserscan.spec) (translations, all Chromium locales but en-US, DevTools,
+software OpenGL) and by stripping docstrings from bytecode.
