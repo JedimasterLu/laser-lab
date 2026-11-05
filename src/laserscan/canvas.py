@@ -692,7 +692,7 @@ class Canvas(QGraphicsView):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumHeight(120)
         self.snap_on, self.tool, self.mode, self.new_op = True, "select", "design", "add"
-        self.stage = QRectF(0, 0, 108000, 71000)
+        self.stage = QRectF(0, 0, 114000, 75000)
         self._shapes: list[ShapeItem] = []
         self._draft: ShapeItem | None = None
         self.editing: ShapeItem | None = None

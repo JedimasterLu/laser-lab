@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict
 
 from PySide6.QtCore import QRectF, Qt, QTimer
@@ -41,6 +42,9 @@ from laserscan.planning import (
     shift,
 )
 from laserscan.session import SESSION
+
+DEFAULT_PORTS = ("COM3", "COM6")
+"""Default (stage, shutter) serial ports of the lab machine."""
 
 TOOLS = {
     "select": ("Select", "W"),
@@ -625,7 +629,11 @@ class MainWindow(QMainWindow):
         ports = serial_ports() if HARDWARE_AVAILABLE else []
         for combo, none in ((self.stage_port, ""), (self.shutter_port, "None")):
             combo.clear()
+            default = DEFAULT_PORTS[combo is self.shutter_port]
             combo.addItems(([none] if none else []) + ports)
+            if HARDWARE_AVAILABLE and default not in ports:
+                combo.addItem(default)
+            combo.setCurrentText(default if HARDWARE_AVAILABLE else combo.itemText(0))
             combo.setEnabled(HARDWARE_AVAILABLE)
 
     def _after_connect(self) -> None:
@@ -714,7 +722,12 @@ class MainWindow(QMainWindow):
             self._finish_run()
             self.canvas.set_marker(dev.position_um())
         elif self.view_mode == "preview":
-            self.canvas.set_marker(dev.position_um())
+            position = dev.position_um()
+            self.canvas.set_marker(position)
+            if position and not dev.simulated and math.dist(position, self.origin) > 0.5:
+                # Real stage: the serial-reported position is the origin (the joystick may move it).
+                self.origin = position
+                self.replan()
         self._was_running = running
 
     def _open(self) -> None:

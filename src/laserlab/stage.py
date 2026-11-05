@@ -32,7 +32,8 @@ class ProScanStage:
         self._comp: str | None = None
         self.wait_time = wait_time
         self.units_per_um = float(units_per_um)
-        self.steps_per_micron = float(self.info[4].split(" = ")[-1])
+        match = re.search(r"MICROSTEPS/MICRON\s*=\s*([\d.]+)", "\n".join(self.info))
+        self.steps_per_micron = float(match.group(1)) if match else 0.0
         self._velocity = self.velocity
 
     def _query(self, command: str) -> str:
