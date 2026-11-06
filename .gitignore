@@ -10,3 +10,13 @@ wheels/
 .venv
 
 *.npy
+
+assets/
+
+docs/
+
+*ipynb
+
+temp/
+
+.pytest_cache/

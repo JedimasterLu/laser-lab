@@ -5,15 +5,51 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "matplotlib>=3.10.9",
-    "opencv-python>=5.0.0.93",
+    "numpy>=2.0",
     "pyserial>=3.5",
-    "shapely>=2.1.2",
 ]
+
+[project.optional-dependencies]
+camera = ["slmsuite>=0.4.1", "opencv-python>=5.0.0.93"]
+slm = ["slmsuite>=0.4.1", "opencv-python>=5.0.0.93"]
+rl = [
+    "gymnasium>=1.3.0",
+    "pyglet>=2.1.15",
+    "stable-baselines3[extra]>=2.9.0",
+    "trackpy>=0.7",
+]
+scan = [
+    "ezdxf>=1.4.5",
+    "gdstk>=1.0.2",
+    "pillow>=12.2.0",
+    "potracer>=0.0.4",
+    "pyside6>=6.7",
+    "shapely>=2.1.2",
+    "skia-python>=138",
+    "svgelements>=1.9.6",
+]
+
+[project.scripts]
+laserlab-train = "laserlab.train:main"
+laserscan = "laserscan.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/laserlab"]
+packages = ["src/laserlab", "src/laserscan"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/assets" = "laserscan/assets"
+
+[dependency-groups]
+build = [
+    "pyinstaller>=6.10",
+]
+dev = [
+    "matplotlib>=3.10.9",
+    "pytest>=8.0",
+    "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.8",
+]

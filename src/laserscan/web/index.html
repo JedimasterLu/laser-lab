@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LaserScan</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/theme.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <span class="brand">LaserScan</span><span class="version" id="version"></span>
+    <div class="dd nav" id="files-menu"></div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-head">
+          <h2>Devices</h2>
+          <span class="grow-space"></span>
+          <div class="row">
+            <span class="led ok" id="device-led" title="Not connected"></span>
+            <button class="btn" id="connect">Connect</button>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="field"><label class="field-label">Stage port</label><div class="dd" id="stage-port"></div></div>
+          <div class="field"><label class="field-label">Shutter port</label><div class="dd" id="shutter-port"></div></div>
+        </div>
+        <div class="alert alert-error" id="device-msg"></div>
+      </section>
+
+      <section class="card" id="scan-card">
+        <h2>Scan</h2>
+        <label class="field-label">Fill pattern (closed shapes)</label>
+        <div class="pills" id="patterns"></div>
+        <div class="fields">
+          <div class="field"><label class="field-label">Step (µm)</label><input class="input" id="step" type="number" min="0.01" step="any" value="3"></div>
+          <div class="field"><label class="field-label">Angle (°)</label><input class="input" id="angle" type="number" step="any" value="0"></div>
+          <div class="field"><label class="field-label">Speed (µm/s)</label><input class="input" id="speed" type="number" min="0.1" step="any" value="20"></div>
+          <div class="field"><label class="field-label">Margin (µm)</label><input class="input" id="margin" type="number" min="0" step="any" value="0"></div>
+          <div class="field"><label class="field-label">Passes</label><input class="input" id="passes" type="number" min="1" step="1" value="1"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Terminal</h2>
+          <div class="pills pills-compact">
+            <button class="pill on" id="hide-poll" title="Hide the position polling commands">Hide P / $,S polling</button>
+            <button class="pill" id="clear-monitor">Clear</button>
+          </div>
+        </div>
+        <pre class="monitor" id="monitor"></pre>
+      </section>
+    </aside>
+
+    <main class="content">
+      <section class="card grow">
+        <div class="card-head">
+          <h2>Canvas</h2>
+          <span class="badge-tag" id="monitor-badge" hidden>MONITOR</span>
+          <span class="grow-space"></span>
+          <div class="row">
+            <span class="muted small">Shutter</span><span class="led" id="led" title="Shutter"></span>
+            <button class="btn btn-primary" id="start">Start</button>
+            <button class="btn" id="pause">Pause</button>
+            <button class="btn btn-danger" id="abort">Abort</button>
+          </div>
+        </div>
+        <div class="progress-row"><span class="muted small" id="status">Idle</span><div class="progress"><i id="progress"></i></div></div>
+        <div class="muted small" id="estimate"></div>
+        <div class="toolbar" id="toolbar"><button class="hint-link" id="guide-link" title="Keyboard shortcuts (Mod+/)">Shortcuts <kbd>Ctrl+/</kbd></button></div>
+        <div class="alert alert-error" id="alerts"></div>
+        <div class="stage-wrap" id="stage-wrap"></div>
+        <div class="cursor-label" id="cursor"></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="js/geom.js"></script>
+<script src="js/canvas.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

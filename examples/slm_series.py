@@ -1,53 +1,69 @@
 """Minimal EXULUS SLM example.
 
-Generates a grayscale target image, computes the CGH phase pattern and
-displays it on the SLM panel via :class:`laserlab.EXULUS`.
+The Thorlabs SDK creates a fullscreen ``CghDisplayCreateWindow`` on the
+selected monitor, so the SLM must be the chosen ``monitor`` index — if
+it points at the main display, that screen will go black instead of the
+SLM.  Run the script first with ``monitor=1``; if the SLM is the
+secondary display use ``monitor=2`` (matches the SDK sample).
 
-Run with the mock backend (cross-platform, no hardware required)::
+Important lifetime rules (from cgh_display.h / SDK example):
 
-    LASERLAB_MOCK=1 python examples/slm_series.py
-
-On Windows with the Thorlabs USB connection attached, drop the
-``LASERLAB_MOCK`` variable and adapt ``serial`` if needed.
+* The last frame stays visible only while the display window handle is
+  open.  ``close()`` / leaving a ``with`` block blanks the SLM.
+* Do **not** open the display before CGH calculation if you want to
+  avoid a black flash — ``show_image`` now computes first, then opens.
+* For a pattern that stays up until you dismiss it, keep the process
+  alive (``input()``) and call ``close()`` yourself.
 """
-
 import os
-from pathlib import Path
-
-os.environ.setdefault("LASERLAB_MOCK", "1")  # noqa: E402
-
-import cv2  # noqa: E402
-import numpy as np  # noqa: E402
-
 import laserlab  # noqa: E402
 
 
-def generate_target(path: Path, size: int = 256) -> Path:
-    """Synthesise a grayscale image with a bright Gaussian spot."""
-    x = np.linspace(-1, 1, size)
-    y = np.linspace(-1, 1, size)
-    xx, yy = np.meshgrid(x, y)
-    img = (255 * np.exp(-(xx**2 + yy**2) / 0.05)).clip(0, 255).astype(np.uint8)
-    cv2.imwrite(str(path), img)
-    return path
-
-
 def main() -> None:
-    target = generate_target(Path("/tmp/slm_target.png"))
+    cwd = os.getcwd()
+    target = os.path.join(cwd, "assets/grad_01.png")
 
-    with laserlab.EXULUS(serial="MOCK0001") as slm:
-        slm.set_phase_stroke(1)    # 0 = full-wave, 1 = half-wave
-        slm.set_hflip(False)       # horizontal mirror on the panel
+    # Pick the SLM monitor here.  ``monitor=1`` is the safest default;
+    # bump to 2 if the SLM is your secondary display.
+    monitor = 2
+    # Optional per-frame pause while cycling resize modes.
+    hold_seconds = 1.0
 
-        phase = slm.show_image(
-            target,
-            resize_mode=laserlab.EXULUS.RESIZE_FIT,
-            background=0,
-        )
-        ack = slm.check_communication()
-        print(f"comm ack: {ack} (6 = Ack)")
-        print(f"phase: shape={phase.shape} dtype={phase.dtype}")
-        print(f"showing: {target}")
+    # Do not use ``with`` if you want the final pattern to remain after
+    # the loop — ``__exit__`` closes the fullscreen window and blanks
+    # the SLM (SDK behaviour).
+    slm = laserlab.EXULUS(wavelength_m=532e-9, distance_m=2)
+    slm.connect()
+    try:
+        slm.set_phase_stroke(0)
+        slm.set_hflip(False)
+
+        # Iterate the four resize modes.  ``show_image`` computes CGH
+        # first, then opens/reuses the fullscreen window, so the black
+        # flash is limited to the brief window-create moment.
+        for mode, name in [
+            (laserlab.EXULUS.RESIZE_CENTER, "CENTER"),
+            (laserlab.EXULUS.RESIZE_FIT, "FIT"),
+            (laserlab.EXULUS.RESIZE_FILL, "FILL"),
+            (laserlab.EXULUS.RESIZE_STRETCH, "STRETCH"),
+        ]:
+            phase = slm.show_image(
+                target,
+                resize_mode=mode,
+                background=0,
+                monitor=monitor,
+                hold_seconds=hold_seconds,
+            )
+            ack = slm.check_communication()
+            print(
+                f"mode={name:<8} ack={ack} (6 = Ack) "
+                f"shape={phase.shape} dtype={phase.dtype}"
+            )
+
+        # Keep the last frame on the SLM until the user dismisses it.
+        input("Pattern is on the SLM. Press Enter to close the window...")
+    finally:
+        slm.close()
 
 
 if __name__ == "__main__":
