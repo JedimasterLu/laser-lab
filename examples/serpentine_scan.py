@@ -1,13 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import laserlab
 from shapely.geometry import Polygon
 import os
-import json
-import time
-import cv2
-import laserlab
-
-CAMERA_DLL = r"C:\Program Files\Nikon\DSCamSDK\Samples\KsCamExample\SDK\DSCam.dll"
 
 def generate_rectangle_vertices(p1: tuple[float, float], p2: tuple[float, float]) -> np.ndarray:
     """
@@ -112,388 +107,309 @@ def generate_rectangle_serpentine_path_smooth(bounds: tuple, step: float, direct
     else:
         raise ValueError("Direction must be either 'horizontal' or 'vertical'.")
 
-def generate_angled_serpentine_path(bounds: tuple, step: float, angle_deg: float) -> np.ndarray:
-    """
-    Generate smooth serpentine points within a rectangular bounds at any angle.
-    
-    Args:
-        bounds (tuple): (min_x, min_y, max_x, max_y)
-        step (float): The distance between each scan line.
-        angle_deg (float): Angle of the scan lines in degrees from the horizontal.
-                           (e.g., 0 = horizontal, 90 = vertical, 45 = diagonal).
-    """
-    min_x, min_y, max_x, max_y = bounds
-    theta = np.radians(angle_deg)
-    
-    # Unit vector normal (perpendicular) to the scan lines
-    nx = -np.sin(theta)
-    ny = np.cos(theta)
-    
-    # 4 corners of the bounding box
-    corners = np.array([
-        [min_x, min_y],
-        [max_x, min_y],
-        [max_x, max_y],
-        [min_x, max_y]
-    ])
-    
-    # Project the corners onto the normal vector to find the range of 'd'
-    # 'd' represents the distance from the origin to each parallel scan line
-    projections = corners[:, 0] * nx + corners[:, 1] * ny
-    d_min, d_max = np.min(projections), np.max(projections)
-    
-    # Generate the steps along the normal vector
-    d_values = np.arange(d_min, d_max + 1e-9, step)
-    
-    path = []
-    left_to_right = True
-    
-    for d in d_values:
-        intersections = []
-        
-        # 1. Find intersections with Left & Right edges (x = min_x, x = max_x)
-        if abs(ny) > 1e-9: # Avoid division by zero if lines are perfectly vertical
-            for x_edge in (min_x, max_x):
-                y_edge = (d - nx * x_edge) / ny
-                # Check if the intersection happens within the physical box
-                if min_y - 1e-9 <= y_edge <= max_y + 1e-9:
-                    intersections.append((x_edge, np.clip(y_edge, min_y, max_y)))
-                    
-        # 2. Find intersections with Top & Bottom edges (y = min_y, y = max_y)
-        if abs(nx) > 1e-9: # Avoid division by zero if lines are perfectly horizontal
-            for y_edge in (min_y, max_y):
-                x_edge = (d - ny * y_edge) / nx
-                if min_x - 1e-9 <= x_edge <= max_x + 1e-9:
-                    intersections.append((np.clip(x_edge, min_x, max_x), y_edge))
-        
-        # Filter down to unique points (handles cases where a line perfectly clips a corner)
-        unique_pts = []
-        for pt in intersections:
-            if not any(np.allclose(pt, u_pt, atol=1e-7) for u_pt in unique_pts):
-                unique_pts.append(pt)
-        
-        # If we successfully found where the line enters and exits the ROI
-        if len(unique_pts) >= 2:
-            # Sort the points along the direction of the scan line
-            dx, dy = np.cos(theta), np.sin(theta)
-            unique_pts.sort(key=lambda p: p[0]*dx + p[1]*dy)
-            
-            pt1, pt2 = unique_pts[0], unique_pts[-1]
-            
-            # Alternate directions for the serpentine sweep
-            if left_to_right:
-                path.extend([pt1, pt2])
-            else:
-                path.extend([pt2, pt1])
-                
-            left_to_right = not left_to_right
-            
-    return np.array(path)
-
-def visualize_angled_path(bounds: tuple, scan_points: np.ndarray, angle_deg: float):
-    """
-    Visualizes the generated serpentine path within the bounding box.
-    Inverts the Y-axis to match camera/screen coordinates.
-    """
-    min_x, min_y, max_x, max_y = bounds
-    
-    plt.figure(figsize=(8, 6))
-    
-    # 1. Draw the bounding box (ROI)
-    box_x = [min_x, max_x, max_x, min_x, min_x]
-    box_y = [min_y, min_y, max_y, max_y, min_y]
-    plt.plot(box_x, box_y, 'r--', label="ROI Boundary", linewidth=2)
-    
-    # 2. Draw the serpentine path
-    plt.plot(scan_points[:, 0], scan_points[:, 1], 'b-', alpha=0.7, label=f"Laser Path ({angle_deg}°)")
-    
-    # 3. Highlight individual intersection points
-    plt.scatter(scan_points[:, 0], scan_points[:, 1], c='blue', s=15, alpha=0.5)
-    
-    # 4. Highlight Start and End points explicitly for safety verification
-    plt.scatter(scan_points[0, 0], scan_points[0, 1], c='green', s=150, marker='*', label='Start')
-    plt.scatter(scan_points[-1, 0], scan_points[-1, 1], c='red', s=150, marker='X', label='End')
-    
-    # 5. Invert Y-Axis to match the CV camera screen coordinates
-    plt.gca().invert_yaxis()
-    
-    # Formatting
-    plt.title(f"Angled Serpentine Path Visualization ({angle_deg}°)")
-    plt.xlabel("X (Stage Steps)")
-    plt.ylabel("Y (Stage Steps) - Inverted for Screen")
-    plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
-    plt.grid(True, linestyle=':', alpha=0.6)
-    plt.axis('equal') # Keep the aspect ratio square so angles visually look correct
-    plt.tight_layout()
-    
-    print("Close the plot window to continue hardware execution...")
-    plt.show()
-
-
-def save_frame(path: str, image: np.ndarray) -> None:
-    arr = np.asarray(image)
-
-    if arr.dtype != np.uint8:
-        arr = arr.astype(np.float32)
-        lo = float(arr.min())
-        hi = float(arr.max())
-        if hi > lo:
-            arr = ((arr - lo) / (hi - lo) * 255.0).clip(0, 255).astype(np.uint8)
-        else:
-            arr = np.zeros_like(arr, dtype=np.uint8)
-
-    ok = cv2.imwrite(path, arr)
-    if not ok:
-        raise RuntimeError(f"failed to write image: {path}")
-    
-def main_pipeline():
-    print("=== PUF Laser Automation Pipeline ===")
+def main():
+    print("=" * 60)
+    print("Initiating Batch Serpentine Scan Controller...")
+    print("=" * 60)
     
     # ---------------------------------------------------------
-    # 0. INITIALIZE HARDWARE 
+    # 0. HARDWARE INITIALIZATION
     # ---------------------------------------------------------
-    stage_port = "COM3"  # Replace with actual COM port
-    shutter_port = "COM6" # Replace with actual COM port
+    stage = laserlab.ProScanStage(port="COM3")
+    stage.position
+    shutter = laserlab.SC30Shutter(port="COM6")
+    shutter.set_mode('manual')
+    shutter.close()
     
-    stage = laserlab.ProScanStage(port=stage_port)
-    shutter = laserlab.SC30Shutter(port=shutter_port)
-    camera = None
-
     # ---------------------------------------------------------
-    # 1. REGION SELECTION (3-Way Branch)
+    # 1. ROI DEFINITION
     # ---------------------------------------------------------
-    print("\n--- 1. Region Selection ---")
-    print("Select an option:")
-    print("  [0] Pre-load an existing ROI ('roi_vertices.npy')")
-    print("  [1] Draw boundaries manually (2 diagonal corners)")
-    print("  [2] Input square dimensions (1 reference corner + side length)")
+    print("\nSelect ROI Method:")
+    print(" 1: Define NEW rectangle using joystick")
+    print(" 2: Load PREVIOUS rectangle from memory")
     
-    method = input("Enter your choice (0, 1, or 2): ").strip()
+    roi_choice = ""
+    while roi_choice not in ["1", "2"]:
+        roi_choice = input("Enter choice (1 or 2): ").strip()
     
-    if method == "0":
-        try:
-            vertices = np.load("roi_vertices.npy")
-            print("Successfully loaded existing 'roi_vertices.npy'.")
-        except FileNotFoundError:
-            print("Error: 'roi_vertices.npy' not found. Please run option 1 or 2 first.")
-            return
-
-    elif method == "1":
-        print("\nUse the joystick to move to the first corner, then press 'a'.")
-        print("Move to the opposite diagonal corner and press 'a' again.")
-        diagonal_points = []
-        while len(diagonal_points) < 2:
-            new_input = input("Enter command ('a' to add point): ").strip().lower()
-            if new_input == "a":
-                diagonal_points.append(stage.position)
-                print(f"Corner {len(diagonal_points)} added: {stage.position}")
-            else:
-                print("Invalid command. Please enter 'a'.")
-        
-        vertices = generate_rectangle_vertices(diagonal_points[0], diagonal_points[1])
-        np.save("roi_vertices.npy", vertices)
-        print("ROI generated and saved to 'roi_vertices.npy'.")
-
-    elif method == "2":
-        print("\nUse the joystick to move to the reference corner, then press 'a'.")    
-        reference_point = None
-        while reference_point is None:
-            new_input = input("Enter command ('a' to add point): ").strip().lower()
-            if new_input == "a":
-                reference_point = stage.position
-                print(f"Reference corner added: {reference_point}")
-            else:
-                print("Invalid command. Please enter 'a'.")
-                
-        side_length_um = float(input("Enter the side length of the square in microns: "))
-        side_length_steps = side_length_um * stage.steps_per_micron # Assuming steps_per_micron is accessible
-        print("Note that the vertical axis is inverted - what appears to be the top right is actually bottom right")
-        vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
-        
-        vertices = generate_rectangle_vertices_with_point_and_diagonal_length(reference_point, side_length_steps, vert_rel_position)
-        np.save("roi_vertices.npy", vertices)
-        print("Square generated and saved to 'roi_vertices.npy'.")
-        
+    vertices = None
+    if roi_choice == "2" and os.path.exists("roi_vertices.npy"):
+        vertices = np.load("roi_vertices.npy")
+        print(f"Successfully loaded previous ROI with {len(vertices)} vertices.")
     else:
-        print("Invalid selection. Exiting.")
-        return
-
-    # Create Polygon and calculate bounds for later
-    roi_polygon = Polygon(vertices)
-    min_x, min_y, max_x, max_y = roi_polygon.bounds
-    center_x = (min_x + max_x) / 2.0
-    center_y = (min_y + max_y) / 2.0
-    print("ROI Polygon successfully established.")
-
-
-    # ---------------------------------------------------------
-    # 2. ROUTINE DEVELOPMENT (Complex Dictionary)
-    # ---------------------------------------------------------
-    print("\n--- 2. Routine Configuration ---")
-    routine_dictionary = []
+        if roi_choice == "2":
+            print("No saved ROI found. Defaulting to new setup.")
+            
+        rectangle_method = ""
+        while rectangle_method not in ["1", "2"]:
+            print("\nSelect Rectangle Definition Method:")
+            print(" 1: Define using two diagonal corners")
+            print(" 2: Define using one corner and side length")
+            rectangle_method = input("Enter choice (1 or 2): ").strip()
+        
+        if rectangle_method == "1":
+            print("Use the joystick to move to the first corner, then press 'a'.")
+            print("Move to the opposite diagonal corner and press 'a' again.")
+                
+            diagonal_points = []
+            while len(diagonal_points) < 2:
+                new_input = input("Enter command ('a' to add point): ").strip().lower()
+                if new_input == "a":
+                    diagonal_points.append(stage.position)
+                    print(f"Corner {len(diagonal_points)} added: {stage.position}")
+                else:
+                    print("Invalid command. Please enter 'a'.")
+            try:
+                vertices = generate_rectangle_vertices(diagonal_points[0], diagonal_points[1])
+                np.save("roi_vertices.npy", vertices)
+                print("Rectangle generated and saved to 'roi_vertices.npy' successfully.")
+            except ValueError as e:
+                print(f"Error: {e}")
+            return 
+        else:
+            print("Use the joystick to move to the reference corner, then press 'a'.")    
+            reference_point = None
+            while reference_point is None:
+                new_input = input("Enter command ('a' to add point): ").strip().lower()
+                if new_input == "a":
+                    reference_point = stage.position
+                    print(f"Reference corner added: {reference_point}")
+                else:
+                    print("Invalid command. Please enter 'a'.")
+            # ----------------------------------------------------------------------
+                    
+            side_length_um = float(input("Enter the side length of the square in microns: "))
+            side_length_steps = side_length_um * stage.steps_per_micron
+            vert_rel_position = input("Specify the position of the reference corner relative to the square (bottom-left, bottom-right, top-left, top-right): ").strip().lower()
+        
+            # Replaced `stage.position` with the `reference_point` we just captured
+            vertices = generate_rectangle_vertices_with_point_and_diagonal_length(reference_point, side_length_steps, vert_rel_position)
+            np.save("roi_vertices.npy", vertices)
+            print("Square generated and saved to 'roi_vertices.npy' successfully.")    
+        
+    polygon = Polygon(vertices)
+    if (not polygon.is_valid) or polygon.area <= 0:
+        raise ValueError("Invalid polygon. Please ensure vertices define one closed area.")
     
-    print("Build your testing routine. You can stack multiple scanning phases.")
-    phase_count = 1
+    min_x, min_y, max_x, max_y = polygon.bounds
+
+    # ---------------------------------------------------------
+    # 2. BATCH SCHEDULE BUILDER: LIBRARY & PHASES
+    # ---------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("STEP 1: DEFINE CONFIGURATION LIBRARY")
+    print("=" * 60)
+    
+    config_library = {}
     
     while True:
-        print(f"\n--- Phase {phase_count} ---")
-        
-        # Get the angle instead of H/V
-        angle_input = input("Scan angle in degrees (e.g., 0 for horizontal, 90 for vertical, 45 for diagonal): ").strip()
-        angle_deg = float(angle_input) if angle_input else 0.0
-        
-        step_um = float(input("Enter the step size (distance between lines) in microns: "))
-        sweep_time = float(input("Enter the desired sweep time per longest line in seconds: "))
-        iterations = int(input(f"How many times should the {angle_deg}° scan run? "))
-        
-        # Calculate Required Velocity for this specific phase
-        # For an angled scan, we use the maximum diagonal distance to ensure safe, consistent velocity
-        diag_distance_um = np.sqrt((max_x - min_x)**2 + (max_y - min_y)**2) / stage.steps_per_micron
-            
-        velocity_um_s = diag_distance_um / sweep_time
-
-        # Append to our master dictionary
-        phase_config = {
-            "phase": phase_count,
-            "angle_deg": angle_deg,
-            "step_um": step_um,
-            "sweep_time_s": sweep_time,
-            "velocity_um_s": velocity_um_s,
-            "iterations": iterations
-        }
-        routine_dictionary.append(phase_config)
-        
-        more = input("Add another phase to this routine? (y/n): ").strip().lower()
-        if more != 'y':
-            break
-        else:
-            phase_count += 1
-            continue
-
-    # Save dictionary as a JSON file so it is human-readable later
-    with open("routine_config.json", "w") as f:
-        json.dump(routine_dictionary, f, indent=4)
-    print("\nRoutine saved to 'routine_config.json'.")
-
-
-    # ---------------------------------------------------------
-    # 3. CAMERA AUTOMATION PROMPT
-    # ---------------------------------------------------------
-    print("\n--- 3. Camera Mode Selection ---")
-    auto_cam_choice = input("Do you want to automate camera image captures? (y/n): ").strip().lower()
-    
-    if auto_cam_choice == 'y':
-        print("Initializing Nikon camera...")
         try:
-            camera = laserlab.NikonDSFi3Camera(
-                dll_path=CAMERA_DLL,
-                camera_index=0,
-                exposure_s=4e-3,
-                verbose=True,
-            )
-            print("Camera successfully linked.")
-            microscope = laserlab.NikonTi2()
-            print("Microscope successfully linked.")
-        except Exception as e:
-            print(f"Failed to initialize camera: {e}\nFalling back to manual camera mode.")
-            camera = None
+            num_settings = int(input("How many UNIQUE configurations do you want to define? "))
+            if num_settings > 0: break
+        except ValueError:
+            print("Please enter a valid number.")
 
-    os.makedirs("PUF_Runs", exist_ok=True)
+    # BUILD THE LIBRARY
+    for i in range(1, num_settings + 1):
+        print(f"\n--- Defining Configuration ID: {i} ---")
+        
+        dir_choice = ""
+        while dir_choice not in ["1", "2"]:
+            dir_choice = input("Select scan direction (1: Horizontal, 2: Vertical): ").strip()
+        direction = "horizontal" if dir_choice == "1" else "vertical"
+        
+        step_um = float(input(f"Enter distance between {direction} scan lines (um): "))
+        sweep_time = float(input(f"Enter time to sweep one {direction} line (s): "))
 
-    # ---------------------------------------------------------
-    # 4. EXECUTION LOOP
-    # ---------------------------------------------------------
-    print("\n--- 4. Beginning Execution Loop ---")
+        # Pre-calculate paths and velocities 
+        step_steps = step_um * stage.steps_per_micron
+        scan_points = generate_rectangle_serpentine_path_smooth(polygon.bounds, step=step_steps, direction=direction)
+        
+        sweep_distance_steps = (max_x - min_x) if direction == 'horizontal' else (max_y - min_y)
+        velocity_um_s = (sweep_distance_steps / stage.steps_per_micron) / sweep_time
+
+        # Save to library
+        config_library[i] = {
+            "id": i,
+            "direction": direction,
+            "step_um": step_um,
+            "sweep_time": sweep_time,
+            "velocity": velocity_um_s,
+            "path": scan_points
+        }
+        
+        print(f"Config {i} locked in. (Velocity: {velocity_um_s:.2f} um/s)")
+        
+        # --- Visualization & Saving (Moved here so it only happens ONCE per unique config) ---
+        vertices_mm = vertices / (1000 * stage.steps_per_micron)
+        scan_points_mm = scan_points / (1000 * stage.steps_per_micron)
+
+        fig, ax = plt.subplots()
+        ax.plot(vertices_mm[:, 0], vertices_mm[:, 1], 'ro-')
+        ax.set_title(f"Config {i}: {direction.capitalize()} Scan")
+        ax.set_xlabel("X (mm)")
+        ax.set_ylabel("Y (mm)")
+        ax.fill(vertices_mm[:, 0], vertices_mm[:, 1], alpha=0.3)
+        if len(scan_points_mm) > 0:
+            ax.plot(scan_points_mm[:, 0], scan_points_mm[:, 1], 'b.-', lw=0.8, ms=2)
+            ax.scatter(scan_points_mm[0, 0], scan_points_mm[0, 1], c='g', s=40, label='Start')
+            ax.scatter(scan_points_mm[-1, 0], scan_points_mm[-1, 1], c='k', s=40, label='End')
+            ax.legend()
+            
+        print("Plotting path... Close the window to proceed.")
+        plt.show() 
+        plt.close(fig)
+
+        '''
+        save_choice = input(f"Save scan points for Config {i} to CSV? (y/n): ")
+        if save_choice.lower() == 'y':
+            filename = f"scan_points_config_{i}.csv"
+            np.savetxt(filename, scan_points, delimiter=",", header="x_steps,y_steps", comments="")
+            print(f"Saved to '{filename}'.")
+        '''
+    # BUILD THE EXECUTION SCHEDULE
+    print("\n" + "=" * 60)
+    print("STEP 2: BUILD EXECUTION SCHEDULE")
+    print("=" * 60)
+    print("Available IDs:")
+    for key, val in config_library.items():
+        print(f"  ID {key}: {val['direction'].capitalize()} | {val['step_um']}um | {val['sweep_time']}s")
+
+    scan_schedule = []
+
+    print("\nSelect Scheduling Mode:")
+    print("  1: Simple Sequence (Run configs in sequential order: 1, 2, 3...)")
+    print("  2: Advanced Blocks (Build custom phases, alternations, and repeats)")
     
-    global_run_counter = 0
-    total_runs = sum(phase["iterations"] for phase in routine_dictionary)
-
-    for phase in routine_dictionary:
-        print(f"\n================ STARTING PHASE {phase['phase']} ({phase['angle_deg']}° ANGLE) ================")
-        
-        # 4a. Generate the path just once for this specific phase
-        step_steps = phase["step_um"] * stage.steps_per_micron
-        
-        # Call the newly updated angled generation function
-        bounds = (min_x, min_y, max_x, max_y)
-        scan_points = generate_angled_serpentine_path(bounds, step_steps, phase["angle_deg"])
-        
-        # --- NEW: VISUALIZE THE PATH ---
-        visualize_angled_path(bounds, scan_points, phase["angle_deg"])
-        # -------------------------------
-        
-        # 4b. Execute iterations for this phase
-        for i in range(phase["iterations"]):
-            print(f"\n--- RUN {global_run_counter}/{total_runs} [Phase {phase['phase']}: {i+1}/{phase['iterations']}] ---")
+    while True:
+        sched_mode = input("Enter choice (1 or 2): ").strip()
+        if sched_mode in ["1", "2"]:
+            break
             
-            # PRE-SCAN IMAGING
-            print("Moving to center for Pre-Scan Image...")
-            stage.move_to(center_x, center_y)
-            time.sleep(0.5) 
-
-            # Capture a pre-scan image
-            if global_run_counter == 0:  # Only capture the first pre-scan image for the very first run
-                if camera:
-                    microscope.quick_autofocus_with_camera(
-                        camera,
-                        speed=1,
-                        coarse_half_range_um=50,
-                        coarse_steps=10,
-                        fine_half_range_um=5,
-                        fine_steps=40
-                    )
-                    img = camera.get_image()
-                    # cv2.imwrite(f"PUF_Runs/Run_{global_run_counter}_Before.tif", img)
-                    save_frame(f"PUF_Runs/Run={global_run_counter}.tif", img)
-                    global_run_counter += 1
-                else:
-                    input("MANUAL MODE: Please capture the Pre-Scan image, then press Enter...")
-
-            # HARDWARE EXECUTION
-            print("Moving to scan start position...")
-            stage.move_to(scan_points[0][0], scan_points[0][1])
-            time.sleep(0.5)
-            
-            # Set the calculated velocity for this specific phase
-            stage.set_velocity(phase["velocity_um_s"])
-            
-            #input("SAFETY: Turn ON the physical laser switch. Press Enter when ready...")
-            
+    if sched_mode == "1":
+        while True:
             try:
-                print(f"Executing {phase['angle_deg']}° scan at {phase['velocity_um_s']:.2f} um/s...")
-                shutter.open()
-                stage.scan(scan_points) 
-            finally:
-                shutter.close()
-                print("Scan complete. Shutter closed.")
+                repeats = int(input("How many times do you want to run this full sequence (1,2,3,... in that order, how many times)? "))
+                if repeats > 0: break
+            except ValueError:
+                print("Please enter a valid number.")
                 
-            #input("SAFETY: Turn OFF the physical laser switch. Press Enter when ready...")
+        for _ in range(repeats):
+            for c_id in config_library:
+                scan_schedule.append(config_library[c_id])
+                
+    elif sched_mode == "2":
+        while True:
+            try:
+                print("Here, you can define different combinations of the configuration settings in multiple phases.")
+                num_phases = int(input("\nHow many execution phases (blocks) do you want to schedule?"))
+                if num_phases > 0: break
+            except ValueError:
+                print("Please enter a valid number.")
 
-            # POST-SCAN IMAGING
-            print("Moving to center for Post-Scan Image...")
-            stage.move_to(center_x, center_y)
-            time.sleep(0.5)
-            
-            
-            if camera:
-                microscope.quick_autofocus_with_camera(
-                    camera,
-                    speed=1,
-                    coarse_half_range_um=50,
-                    coarse_steps=10,
-                    fine_half_range_um=5,
-                    fine_steps=40
-                )
-                img = camera.get_image()
-                save_frame(f"PUF_Runs/Run={global_run_counter}_angle_deg={phase['angle_deg']}_step_size={phase['step_um']}_velocity={phase['velocity_um_s']:.2f}.tif", img)
+        for phase in range(1, num_phases + 1):
+            print(f"\n--- Phase {phase} ---")
+            while True:
+                print(f"Here, enter the combinations you want in the {phase} phase.")
+                seq_input = input("Enter the Config IDs to run in sequence, separated by commas (e.g., '1,3' or '1,2,3'): ")
+                try:
+                    sequence = [int(x.strip()) for x in seq_input.split(',')]
+                    if all(c_id in config_library for c_id in sequence):
+                        break
+                    else:
+                        print(f"Error: Only use defined IDs: {list(config_library.keys())}")
+                except ValueError:
+                    print("Invalid format. Use numbers separated by commas.")
+
+            while True:
+                try:
+                    repeats = int(input(f"How many times should the sequence {sequence} repeat? "))
+                    if repeats > 0: break
+                except ValueError:
+                    print("Please enter a valid number.")
+
+            # Ask for the repetition style if there are multiple items and multiple repeats
+            if len(sequence) > 1 and repeats > 1:
+                print("\nHow should these repeats be structured?")
+                print("  1: Alternating (e.g., 1, 3, 1, 3, 1, 3)")
+                print("  2: Blocked     (e.g., 1, 1, 1, 3, 3, 3)")
+                while True:
+                    rep_style = input("Enter choice (1 or 2): ").strip()
+                    if rep_style in ["1", "2"]:
+                        break
             else:
-                input("MANUAL MODE: Please capture the Post-Scan image, then press Enter...")
-                
-            global_run_counter += 1
+                rep_style = "1" # Defaults to 1 if it's just a single config anyway
+
+            # Execute the chosen logic
+            if rep_style == "1":
+                # Alternating Loop (Iterate the sequence, then repeat)
+                for _ in range(repeats):
+                    for c_id in sequence:
+                        scan_schedule.append(config_library[c_id])
+            else:
+                # Blocked Loop (Repeat each item fully before moving to the next)
+                for c_id in sequence:
+                    for _ in range(repeats):
+                        scan_schedule.append(config_library[c_id])
+                        
+    total_runs = len(scan_schedule)
+    print(f"\nTotal individual runs scheduled across all phases: {total_runs}")
+    
+    # ---------------------------------------------------------
+    # 3. MASTER EXECUTION LOOP (FLATTENED)
+    # ---------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("INITIATING HARDWARE EXECUTION")
+    print("=" * 60)
+    
+    interval_ms = 0
+    
+    for run_idx, current_run in enumerate(scan_schedule):
+        c_id = current_run["id"]
+        
+        print(f"\n--- RUN {run_idx + 1}/{total_runs} (Using Config ID: {c_id}) ---")
+        print(f"Settings: {current_run['direction'].capitalize()} | Step: {current_run['step_um']}um | Time: {current_run['sweep_time']}s")
+        
+        # --- Apply Pre-Calculated Hardware Settings ---
+        stage.set_velocity(current_run["velocity"])
+        scan_points = current_run["path"]
+        
+        # 1. Shutter Safety Check
+        if shutter.is_open():
+            shutter.close()
             
-    print("\n=== All Phases Complete! ===")
-    if camera:
-        camera.close()
+        # 3. Center for Pre-Scan Image
+        print("Moving to ROI center...")
+        center_x = (min_x + max_x) / 2.0
+        center_y = (min_y + max_y) / 2.0
+        stage.move_to(center_x, center_y)
+        
+        input("Stage centered. Please take pre-scan picture now. Press Enter when done...")
+        
+        # 4. Move to Start Point
+        print("Moving to scan starting position...")
+        stage.move_to(*scan_points[0])
+        
+        # 5. Arm & Execute
+        print("\n--- READY TO SCAN ---")
+        print("Scanning...")
+        try:
+            shutter.open()
+            stage.scan(scan_points, interval_ms)  
+        finally:
+            shutter.close()
+            print("Shutter safely closed.")
+            
+        print(f"Run {run_idx + 1} completed.")
+        
+        # 6. Return to center
+        print("Moving back to ROI center for post-scan imaging...")
+        stage.move_to(center_x, center_y)
+        input("Stage centered. Take post-scan picture. Press Enter to continue to the next run...")
+
+    print("\n" + "=" * 60)
+    print("ALL SCHEDULED RUNS COMPLETED SUCCESSFULLY.")
+    print("=" * 60)
 
 if __name__ == "__main__":
-    main_pipeline()
+    main()
