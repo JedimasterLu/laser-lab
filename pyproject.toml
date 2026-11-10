@@ -1,6 +1,6 @@
 [project]
 name = "laserlab"
-version = "0.1.0"
+version = "0.2.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -23,7 +23,7 @@ scan = [
     "gdstk>=1.0.2",
     "pillow>=12.2.0",
     "potracer>=0.0.4",
-    "pyside6>=6.7",
+    "pywebview>=6.0",
     "shapely>=2.1.2",
     "skia-python>=138",
     "svgelements>=1.9.6",

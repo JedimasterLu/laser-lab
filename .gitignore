@@ -20,3 +20,5 @@ docs/
 temp/
 
 .pytest_cache/
+node_modules/
+packaging/*.icns

@@ -1,0 +1,124 @@
+name: Build desktop apps
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to attach files to a GitHub Release
+
+env:
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Runtime dependencies of LaserScan + PyInstaller only; dev tools and the
+      # camera/slm/rl extras must not end up in the bundle.
+      - name: Install dependencies
+        run: uv sync --no-dev --extra scan --group build
+
+      - name: Check tag matches package version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $pkg = uv run --no-sync python -c "import laserscan; print(laserscan.__version__)"
+          if ("v$pkg" -ne $env:VERSION) {
+            throw "Tag $env:VERSION does not match laserscan.__version__ ($pkg)."
+          }
+
+      - name: Build with PyInstaller
+        run: uv run --no-sync pyinstaller packaging/laserscan.spec --noconfirm
+
+      # Imports every lazily loaded module, plans a scan, then opens the real window (Edge WebView2) and runs
+      # the page's own checks. The windowed build has no console, so its output is in the log file.
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath ".\dist\LaserScan\LaserScan.exe" -ArgumentList "--selftest" -PassThru
+          if (-not $proc.WaitForExit(180000)) { Stop-Process -Id $proc.Id -Force; $timeout = $true }
+          $log = Join-Path $env:LOCALAPPDATA "LaserScan\laserscan.log"
+          if (Test-Path $log) { Get-Content $log }
+          if ($timeout) { throw "LaserScan --selftest did not finish within 180 s." }
+          if ($proc.ExitCode -ne 0) { throw "LaserScan --selftest failed with code $($proc.ExitCode)." }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $sevenZip = "$env:ProgramFiles\7-Zip\7z.exe"
+          $name = "LaserScan-$env:VERSION-windows-x64"
+          Push-Location dist
+          & $sevenZip a -tzip -mx=9 "..\$name.zip" LaserScan
+          Pop-Location
+          Get-ChildItem "$name.*" | Format-Table Name, @{n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) }}
+          "{0:N0} MB unpacked" -f ((Get-ChildItem dist\LaserScan -Recurse | Measure-Object Length -Sum).Sum / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LaserScan-${{ env.VERSION }}-windows-x64
+          path: LaserScan-*-windows-x64.zip
+
+  macos:
+    runs-on: macos-latest # Apple silicon
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # python.org-style build: py2app cannot bundle the standalone builds uv downloads.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: python -m pip install ".[scan]" py2app
+
+      - name: Check tag matches package version
+        if: github.ref_type == 'tag'
+        run: |
+          pkg=$(python -c "import laserscan; print(laserscan.__version__)")
+          [ "v$pkg" = "$VERSION" ] || { echo "Tag $VERSION does not match laserscan.__version__ ($pkg)"; exit 1; }
+
+      - name: Build with py2app
+        run: |
+          python packaging/make_icns.py
+          # Run from packaging/: py2app rejects the install_requires that setuptools
+          # derives from the pyproject.toml in the repository root.
+          (cd packaging && python setup_macos.py py2app --dist-dir ../dist)
+          python packaging/postprocess_macos.py dist/LaserScan.app
+
+      # Imports every lazily loaded module, plans a scan, then opens the real window (WKWebView) and runs
+      # the page's own checks.
+      - name: Smoke test
+        run: |
+          dist/LaserScan.app/Contents/MacOS/LaserScan --selftest || { cat ~/Library/Logs/LaserScan/laserscan.log 2>/dev/null; exit 1; }
+          cat ~/Library/Logs/LaserScan/laserscan.log 2>/dev/null || true
+
+      - name: Package
+        run: ditto -c -k --sequesterRsrc --keepParent dist/LaserScan.app "LaserScan-$VERSION-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LaserScan-${{ env.VERSION }}-macos-arm64
+          path: LaserScan-*-macos-arm64.zip
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: LaserScan-*.zip
+          generate_release_notes: true

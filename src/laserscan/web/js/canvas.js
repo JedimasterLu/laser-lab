@@ -1,32 +1,40 @@
 /*
- * Drawing canvas: grid, snapping, selection, Bézier nodes, modal transforms, undo, and the preview / monitor overlay.
+ * Drawing canvas: a Paper.js scene (shapes, scan preview, editing overlay) over a 2D canvas with the grid.
  *
- * World coordinates are microns (X, Y). The view is rotated to match the microscope camera:
- * screen up is +X and screen right is +Y.
+ * Paper owns the geometry, hit tests, transforms, zoom / pan and drawing; this file adds the editor around it:
+ * tools, selection, node editing, modal transforms (G / R / S), snapping, undo, and the preview / monitor display.
+ * Everything is kept in Paper's frame (see shapes.js): world (X, Y) microns are drawn as (Y, -X), so screen up is
+ * +X and screen right is +Y, like the microscope camera.
  */
 (function (root) {
   'use strict';
-  const G = root.Geom;
-  const NS = 'http://www.w3.org/2000/svg';
-  const PAN_LOCK_PX = 12, PAN_LOCK_RATIO = 2.5;
+  const S = root.Shapes;
+  const { Point, Path, CompoundPath, Rectangle, Matrix, Group, Layer, Size, Color } = root.paper;
   const PICK_PX = 8, GRID_PX = 12, GHOST_PX = 16, ZOOM = [1e-4, 200];
   const INK = '#0b0b0b', RED = '#c0392b', BLUE = '#8b5a2b';
-  const MIN_NODES = { polygon: 3, polyline: 2 };
 
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const pt = (p) => (p instanceof Point ? p : new Point(p[0], p[1]));
 
   class Canvas {
     /**
-     * @param {HTMLElement} wrap Container holding the canvas and svg elements.
-     * @param {object} hooks Callbacks: changed, message, cursor, editChanged, toolChanged, selectionChanged, merge, apply.
+     * @param {HTMLElement} wrap Container for the two canvases.
+     * @param {object} hooks Callbacks: changed, message, cursor, editChanged, toolChanged, selectionChanged, merge.
      */
     constructor(wrap, hooks) {
       this.wrap = wrap;
       this.hooks = hooks;
       this.grid = document.createElement('canvas');
-      this.svg = document.createElementNS(NS, 'svg');
-      this.svg.setAttribute('tabindex', '0');
-      wrap.append(this.grid, this.svg);
+      this.el = document.createElement('canvas');
+      this.el.tabIndex = 0;
+      wrap.append(this.grid, this.el);
+
+      root.paper.setup(this.el);
+      this.view = root.paper.view;
+      root.paper.project.clear();
+      this.layers = {};
+      for (const name of ['fill', 'shapes', 'draft', 'plan', 'overlay']) this.layers[name] = new Layer({ name });
+
       this.mode = 'design';
       this.tool = 'select';
       this.newOp = 'add';
@@ -43,18 +51,19 @@
       this.rubber = null;
       this.pan = null;
       this.stage = { x: [0, 114000], y: [0, 75000] };
-      this.region = [];
       this.preview = null;
-      this.progress = [];
+      this.progressItem = null;
+      this.planStrokes = [];
+      this.strokeZoom = 0;
       this.progressAt = [0, -1];
       this.marker = null;
       this.pointer = [0, 0];
       this.indicator = null;
       this.views = {};
-      this.view = { s: 0.01, ox: 0, oy: 0 };
       this.history = ['[]'];
       this.hidx = 0;
       this.locked = false;
+      this.fillDirty = true;
       this._frame = 0;
       this._bind();
       new ResizeObserver(() => { this.size(); this.render(); }).observe(wrap);
@@ -71,33 +80,46 @@
       const dpr = window.devicePixelRatio || 1;
       this.grid.width = Math.round(this.W * dpr);
       this.grid.height = Math.round(this.H * dpr);
+      this.view.viewSize = new Size(this.W, this.H);
     }
 
-    w2s(p) { return [this.view.ox + this.view.s * p[1], this.view.oy - this.view.s * p[0]]; }
-    s2w(x, y) { return [(this.view.oy - y) / this.view.s, (x - this.view.ox) / this.view.s]; }
-    get zoom() { return this.view.s; }
+    get zoom() { return this.view.zoom; }
+
+    /** A length in screen pixels as a length in the Paper frame. Strokes are sized with this, on every zoom change:
+     * Paper's own `strokeScaling: false` transforms every point by hand and costs ~100 us per path. */
+    px(n) { return n / this.zoom; }
+
+    /** World point -> screen pixels. */
+    w2s(p) { const q = this.view.projectToView(S.toPaper(p)); return [q.x, q.y]; }
+    /** Screen pixels -> world point. */
+    s2w(x, y) { return S.toWorld(this.view.viewToProject(new Point(x, y))); }
+    /** Screen pixels -> Paper frame (where all items live). */
+    s2p(sp) { return this.view.viewToProject(pt(sp)); }
 
     gridStep() {
-      const target = GRID_PX / this.view.s;
+      const target = GRID_PX / this.zoom;
       const exp = Math.floor(Math.log10(target));
       for (const f of [1, 2, 5, 10]) if (f * 10 ** exp >= target) return Math.max(1, f * 10 ** exp);
       return 1;
     }
 
+    /** Show the world box [x0, x1] x [y0, y1]. */
     fitRect(x0, x1, y0, y1) {
       const w = Math.max(y1 - y0, 20), h = Math.max(x1 - x0, 20);
-      let s = 0.88 * Math.min(this.W / w, this.H / h);
-      s = Math.min(Math.max(s, ZOOM[0]), ZOOM[1]);
-      const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-      this.view = { s, ox: this.W / 2 - s * cy, oy: this.H / 2 + s * cx };
+      const z = Math.min(Math.max(0.88 * Math.min(this.W / w, this.H / h), ZOOM[0]), ZOOM[1]);
+      this.view.zoom = z;
+      this.view.center = S.toPaper([(x0 + x1) / 2, (y0 + y1) / 2]);
       this.render();
     }
+
+    /** World box [x0, x1, y0, y1] of a rectangle in the Paper frame. */
+    static worldBox(r) { return [-r.bottom, -r.top, r.left, r.right]; }
 
     fit() {
       let box;
       if (this.mode === 'design') {
-        const pts = this.shapes.flatMap((sh) => sh.contours.flatMap((c) => c.pts));
-        box = pts.length ? bounds(pts) : [-325, 325, -500, 500];
+        const r = this.shapes.reduce((acc, s) => (acc ? acc.unite(s.bounds) : s.bounds), null);
+        box = r ? Canvas.worldBox(r) : [-325, 325, -500, 500];
       } else if (this.preview && this.preview.bounds) {
         box = this.preview.bounds.slice();
         if (this.preview.exceeds) box = [Math.min(box[0], this.stage.x[0]), Math.max(box[1], this.stage.x[1]), Math.min(box[2], this.stage.y[0]), Math.max(box[3], this.stage.y[1])];
@@ -109,28 +131,48 @@
 
     setMode(mode) {
       if (mode === this.mode) return;
-      this.views[this.mode] = this.view;
+      this.views[this.mode] = { zoom: this.zoom, center: this.view.center.clone() };
       this.mode = mode;
       if (mode !== 'design') { this.exitEdit(true); this.cancelDraft(); this.xform = null; }
-      if (mode === 'design' && this.views.design) { this.view = this.views.design; this.render(); }
-      else if (mode === 'monitor' && this.views.preview) { this.view = this.views.preview; this.render(); }
-      else this.fit();
+      const saved = mode === 'design' ? this.views.design : mode === 'monitor' ? this.views.preview : null;
+      if (saved) { this.view.zoom = saved.zoom; this.view.center = saved.center; this.render(); } else this.fit();
     }
 
     setStage(x0, x1, y0, y1) { this.stage = { x: [x0, x1], y: [y0, y1] }; this.render(); }
 
+    /** Zoom by `factor` about the screen point `sp`. */
+    zoomAt(sp, factor) {
+      const before = this.s2p(sp);
+      this.view.zoom = Math.min(Math.max(this.zoom * factor, ZOOM[0]), ZOOM[1]);
+      this.view.center = this.view.center.add(before.subtract(this.s2p(sp)));
+      this.render();
+    }
+
+    /** Trackpad pinch: `value` is the relative size change, (x, y) the pinch centre in page pixels. */
+    pinch(value, x, y) {
+      const r = this.el.getBoundingClientRect();
+      this.zoomAt([x - r.left, y - r.top], Math.max(0.2, 1 + value));
+    }
+
     // ---- model ------------------------------------------------------------
 
-    dicts() { return this.shapes.map(G.shapeToDict); }
+    dicts() { return this.shapes.map(S.shapeToDict); }
 
-    setShapes(dicts, record) {
+    /** Replace all shapes by the ones described in `dicts`. */
+    load(dicts) {
       this.cancelDraft();
       this.exitEdit(true);
-      this.shapes = dicts.map(G.shapeFromDict).filter(Boolean);
+      this.shapes.forEach((s) => s.remove());
+      this.shapes = dicts.map(S.shapeFromDict).filter(Boolean);
+      this.shapes.forEach((s) => this.layers.shapes.addChild(s));
       this.sel.clear();
       this.selNodes.clear();
+    }
+
+    setShapes(dicts, record) {
+      this.load(dicts);
       if (record) this.commit();
-      else this.render();
+      else this.touch();
     }
 
     commit() {
@@ -140,39 +182,65 @@
         this.hidx++;
       }
       this.hooks.changed();
-      this.render();
+      this.touch();
     }
 
     restoreHistory() {
-      this.cancelDraft();
-      this.exitEdit(true);
-      this.shapes = JSON.parse(this.history[this.hidx]).map(G.shapeFromDict).filter(Boolean);
-      this.sel.clear();
-      this.selNodes.clear();
+      this.load(JSON.parse(this.history[this.hidx]));
       this.hooks.changed();
-      this.render();
+      this.touch();
     }
 
     undo() { if (this.mode === 'design' && !this.locked && this.hidx > 0) { this.hidx--; this.restoreHistory(); } }
     redo() { if (this.mode === 'design' && !this.locked && this.hidx < this.history.length - 1) { this.hidx++; this.restoreHistory(); } }
 
-    setRegion(rings) { this.region = rings; this.render(); }
+    /** The geometry changed: the yellow fill must be rebuilt. */
+    touch() { this.fillDirty = true; this.render(); }
 
-    /** Show the scan plan. `plan` is [{pts, laser, bad}] already in absolute microns. */
-    setPreview(data) { this.preview = data; this.render(); }
+    /** Show the scan plan. `data.plan` is [{pts, laser, bad}] in absolute microns; `region` rings and `transit` too. */
+    setPreview(data) {
+      this.preview = data;
+      const layer = this.layers.plan;
+      layer.removeChildren();
+      const accent = css('--accent') || '#f5b800';
+      const lines = (list) => list.map((pts) => new Path({ segments: pts.map(S.toPaper), insert: false }));
+      this.planStrokes = [];
+      const compound = (children, style, width = 0, dash = []) => {
+        const item = new CompoundPath({ children, fillColor: null, ...style, parent: layer });
+        this.planStrokes.push({ item, width, dash });
+        return item;
+      };
+      if (data.region.length) {
+        const c = compound(data.region.map(S.ringPath), { strokeColor: null, fillRule: 'evenodd' });
+        c.fillColor = new Color(accent); c.fillColor.alpha = 0.2;
+      }
+      if (data.transit.length) compound(lines(data.transit), { strokeColor: '#8a8f98' }, 1, [2, 3]);
+      const good = data.plan.filter((s) => !s.bad).map((s) => s.pts), bad = data.plan.filter((s) => s.bad).map((s) => s.pts);
+      if (good.length) compound(lines(good), { strokeColor: INK }, 1.2);
+      if (bad.length) compound(lines(bad), { strokeColor: RED }, 2);
+      this.progressItem = compound([], { strokeColor: accent, strokeJoin: 'round', strokeCap: 'round' }, 3);
+      this.progressAt = [0, -1];
+      this.strokeZoom = 0; // sizes the strokes at the next draw
+      this.render();
+    }
 
-    clearProgress() { this.progress = []; this.progressAt = [0, -1]; this.render(); }
+    clearProgress() {
+      if (this.progressItem) this.progressItem.removeChildren();
+      this.progressAt = [0, -1];
+      this.render();
+    }
 
-    setProgress(seg, pt) {
+    setProgress(seg, pt2) {
       const plan = this.preview && this.preview.plan;
-      if (!plan) return;
+      if (!plan || !this.progressItem) return;
+      const item = this.progressItem;
       let [i, j] = this.progressAt;
-      while ((i !== seg || j !== pt) && i < plan.length) {
+      while ((i !== seg || j !== pt2) && i < plan.length) {
         if (j + 1 < plan[i].pts.length) {
           j++;
-          const p = plan[i].pts[j];
-          if (j > 0 && plan[i].laser && this.progress.length) this.progress[this.progress.length - 1].push(p);
-          else this.progress.push([p]);
+          const p = S.toPaper(plan[i].pts[j]);
+          if (j > 0 && plan[i].laser && item.children.length) item.lastChild.add(p);
+          else item.addChild(new Path({ segments: [p], insert: false }));
         } else { i++; j = -1; }
       }
       this.progressAt = [i, j];
@@ -193,7 +261,7 @@
     setPenType(kind) { this.penType = kind; this.hooks.toolChanged(this.tool); }
 
     applyOp(op) {
-      for (const s of this.selectedShapes()) if (s.kind === 'polygon') s.op = op;
+      for (const s of this.selectedShapes()) if (s.data.kind === 'polygon') s.data.op = op;
       this.commit();
     }
 
@@ -202,7 +270,7 @@
       this.cancelDraft();
       this.tool = tool;
       this.hooks.toolChanged(tool);
-      this.svg.style.cursor = tool === 'pen' && this.mode === 'design' ? 'crosshair' : 'default';
+      this.el.style.cursor = tool === 'pen' && this.mode === 'design' ? 'crosshair' : 'default';
       this.render();
     }
 
@@ -210,7 +278,7 @@
 
     selectAll() {
       if (this.mode !== 'design') return;
-      if (this.editing) this.selNodes = new Set(this.editing.contours[this.editing.active].pts.keys());
+      if (this.editing) this.selNodes = new Set(this.contour.segments.map((_, i) => i));
       else this.sel = new Set(this.shapes);
       this.hooks.selectionChanged();
       this.render();
@@ -220,10 +288,8 @@
 
     invertSelection() {
       if (this.mode !== 'design') return;
-      if (this.editing) {
-        const all = this.editing.contours[this.editing.active].pts.keys();
-        this.selNodes = new Set([...all].filter((i) => !this.selNodes.has(i)));
-      } else this.sel = new Set(this.shapes.filter((s) => !this.sel.has(s)));
+      if (this.editing) this.selNodes = new Set(this.contour.segments.map((_, i) => i).filter((i) => !this.selNodes.has(i)));
+      else this.sel = new Set(this.shapes.filter((s) => !this.sel.has(s)));
       this.hooks.selectionChanged();
       this.render();
     }
@@ -233,14 +299,13 @@
       if (this.editing) {
         const sh = this.editing;
         if (this.selNodes.size) {
-          if (!this.deleteNodes(sh, [...this.selNodes])) {
-            this.hooks.message(`A ${sh.kind} needs at least ${MIN_NODES[sh.kind]} nodes. Leave Edit mode (Tab) to delete the whole shape.`, true);
-          }
+          if (S.deleteNodes(this.contour, [...this.selNodes], S.MIN_NODES[sh.data.kind])) this.selNodes.clear();
+          else this.hooks.message(`A ${sh.data.kind} needs at least ${S.MIN_NODES[sh.data.kind]} nodes. Leave Edit mode (Tab) to delete the whole shape.`, true);
         }
         this.commit();
         return;
       }
-      this.shapes = this.shapes.filter((s) => !this.sel.has(s));
+      this.shapes = this.shapes.filter((s) => { if (!this.sel.has(s)) return true; s.remove(); return false; });
       this.sel.clear();
       this.hooks.selectionChanged();
       this.commit();
@@ -249,7 +314,7 @@
     duplicate() {
       const chosen = this.selectedShapes();
       if (this.mode !== 'design' || this.editing || this.xform || !chosen.length) return;
-      const copies = chosen.map((s) => { const c = G.copyShape(s); this.shapes.push(c); return c; });
+      const copies = chosen.map((s) => { const c = S.copyShape(s); this.layers.shapes.addChild(c); this.shapes.push(c); return c; });
       this.sel = new Set(copies);
       this.hooks.selectionChanged();
       this.commit();
@@ -258,7 +323,7 @@
 
     invertOp() {
       const sel = this.selectedShapes();
-      if (this.mode === 'design' && sel.length) this.applyOp(sel[0].op === 'subtract' ? 'add' : 'subtract');
+      if (this.mode === 'design' && sel.length) this.applyOp(sel[0].data.op === 'subtract' ? 'add' : 'subtract');
     }
 
     // ---- edit mode -------------------------------------------------------------
@@ -270,7 +335,7 @@
       if (chosen.length !== 1) { this.hooks.message('Select one shape first, then press Tab to edit its nodes.', false); return false; }
       this.setTool('select');
       this.editing = chosen[0];
-      this.editing.active = 0;
+      this.editing.data.active = 0;
       this.sel.clear();
       this.selNodes.clear();
       this.hooks.editChanged(true);
@@ -283,7 +348,7 @@
       if (!sh) return;
       this.editing = null;
       this.selNodes.clear();
-      sh.active = 0;
+      sh.data.active = 0;
       if (!silent) { this.sel = new Set([sh]); this.commit(); }
       this.hooks.editChanged(false);
       this.hooks.selectionChanged();
@@ -292,164 +357,48 @@
 
     toggleEdit() { if (this.editing) this.exitEdit(); else this.enterEdit(); }
 
-    get contour() { return this.editing && this.editing.contours[this.editing.active]; }
-
-    moveNode(sh, c, i, p) {
-      const d = G.sub(p, c.pts[i]);
-      c.pts[i] = p;
-      for (const h of [c.hin, c.hout]) if (h[i]) h[i] = G.add(h[i], d);
-    }
-
-    moveControl(c, i, side, p, paired) {
-      const [mine, other] = side === 'in' ? [c.hin, c.hout] : [c.hout, c.hin];
-      mine[i] = p;
-      if (c.types[i] === 'sharp') c.types[i] = 'free';
-      if (paired) {
-        const away = G.sub(p, c.pts[i]), len = Math.hypot(...away);
-        if (len > 0) {
-          const reach = c.types[i] === 'symmetric' || !other[i] ? len : G.dist(other[i], c.pts[i]);
-          other[i] = G.sub(c.pts[i], G.mul(away, reach / len));
-        }
-      }
-    }
+    /** The path whose nodes are being edited. */
+    get contour() { return this.editing && this.editing.children[this.editing.data.active]; }
 
     setNodeType(kind) {
-      const sh = this.editing;
-      if (!sh) return;
+      if (!this.editing) return;
       if (!this.selNodes.size) { this.hooks.message('Select one or more nodes first.', false); return; }
-      const c = this.contour, n = c.pts.length, closed = sh.kind === 'polygon';
-      for (const i of this.selNodes) {
-        const here = c.pts[i];
-        if (kind === 'sharp') c.hin[i] = c.hout[i] = null;
-        else if (kind === 'smooth' || kind === 'symmetric') {
-          const prev = closed || i > 0 ? c.pts[(i - 1 + n) % n] : null;
-          const next = closed || i < n - 1 ? c.pts[(i + 1) % n] : null;
-          const a = c.hin[i], b = c.hout[i];
-          let tangent;
-          if (a && b) tangent = G.sub(b, a);
-          else if (a || b) tangent = b ? G.sub(b, here) : G.sub(here, a);
-          else tangent = G.sub(next || here, prev || here);
-          const norm = Math.hypot(...tangent);
-          if (norm > 0) {
-            tangent = G.mul(tangent, 1 / norm);
-            let out = b ? G.dist(b, here) : next ? G.dist(next, here) / 3 : null;
-            let inn = a ? G.dist(a, here) : prev ? G.dist(prev, here) / 3 : null;
-            if (kind === 'symmetric' && out !== null && inn !== null) out = inn = (out + inn) / 2;
-            if (out !== null) c.hout[i] = G.add(here, G.mul(tangent, out));
-            if (inn !== null) c.hin[i] = G.sub(here, G.mul(tangent, inn));
-          }
-        }
-        c.types[i] = kind;
-      }
+      S.setNodeType(this.contour, [...this.selNodes], kind);
       this.commit();
     }
 
-    deleteNodes(sh, idx) {
-      const c = sh.contours[sh.active];
-      const keep = new Set(idx);
-      if (c.pts.length - keep.size < MIN_NODES[sh.kind]) return false;
-      const pick = (arr) => arr.filter((_, i) => !keep.has(i));
-      c.pts = pick(c.pts); c.hin = pick(c.hin); c.hout = pick(c.hout); c.types = pick(c.types);
-      this.selNodes.clear();
-      return true;
-    }
-
     extrude() {
-      const sh = this.editing;
-      if (!sh || this.xform) return;
+      if (!this.editing || this.xform) return;
       if (!this.selNodes.size) { this.hooks.message('Select one or more nodes to extrude.', false); return; }
-      const c = this.contour, closed = sh.kind === 'polygon', chosen = this.selNodes;
-      const out = [], created = [];
-      const spawn = (p) => { created.push(out.length); out.push([p.slice(), null, null, 'sharp']); };
-      c.pts.forEach((p, i) => {
-        if (chosen.has(i) && !closed && i === 0) spawn(p);
-        out.push([p, c.hin[i], c.hout[i], c.types[i]]);
-        if (chosen.has(i) && (closed || i > 0)) spawn(p);
-      });
-      c.pts = out.map((o) => o[0]); c.hin = out.map((o) => o[1]); c.hout = out.map((o) => o[2]); c.types = out.map((o) => o[3]);
-      this.selNodes = new Set(created);
+      this.selNodes = new Set(S.extrudeNodes(this.contour, this.selNodes));
       this.startTransform('grab', true);
-    }
-
-    insertNode(sh, c, wp, tolerance) {
-      const n = c.pts.length, closed = sh.kind === 'polygon' || sh.active > 0;
-      let best = null;
-      for (let i = 0; i < (closed ? n : n - 1); i++) {
-        const j = (i + 1) % n, seg = G.segment(c, i, j);
-        let t, at;
-        if (!seg) {
-          const d = G.sub(c.pts[j], c.pts[i]), span = d[0] * d[0] + d[1] * d[1];
-          t = span === 0 ? 0 : Math.max(0, Math.min(1, ((wp[0] - c.pts[i][0]) * d[0] + (wp[1] - c.pts[i][1]) * d[1]) / span));
-          at = (tt) => G.add(c.pts[i], G.mul(d, tt));
-        } else {
-          let bt = 0, bd = Infinity;
-          for (let k = 0; k <= 64; k++) { const dd = G.dist(G.bezier(seg, k / 64), wp); if (dd < bd) { bd = dd; bt = k / 64; } }
-          let lo = Math.max(0, bt - 1 / 64), hi = Math.min(1, bt + 1 / 64);
-          for (let k = 0; k < 24; k++) {
-            const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
-            if (G.dist(G.bezier(seg, m1), wp) < G.dist(G.bezier(seg, m2), wp)) hi = m2; else lo = m1;
-          }
-          t = (lo + hi) / 2;
-          at = (tt) => G.bezier(seg, tt);
-        }
-        const d = G.dist(at(t), wp);
-        if (!best || d < best[0]) best = [d, i, j, t];
-      }
-      if (!best || best[0] > tolerance) return null;
-      const [, i, j, t] = best;
-      const seg = G.segment(c, i, j);
-      let anchor, nin = null, nout = null;
-      if (!seg) anchor = G.lerp(c.pts[i], c.pts[j], t);
-      else {
-        const [left, right] = G.split(seg, t);
-        anchor = left[3]; nin = left[2]; nout = right[1];
-        c.hout[i] = left[1]; c.hin[j] = right[2];
-      }
-      c.pts.splice(i + 1, 0, anchor);
-      c.hin.splice(i + 1, 0, nin);
-      c.hout.splice(i + 1, 0, nout);
-      c.types.splice(i + 1, 0, nin ? 'smooth' : 'free');
-      return i + 1;
     }
 
     // ---- modal transforms (G / R / S) ------------------------------------------
 
     get transforming() { return !!this.xform; }
 
-    /** What a modal transform or flip acts on: the selected nodes in Edit mode, else every contour of the selected shapes. */
+    /** What a transform or flip acts on: the selected nodes in Edit mode, else every node of the selected shapes. */
     transformItems() {
-      let targets;
-      if (this.editing) {
-        targets = this.selNodes.size ? [[this.editing, this.editing.active, [...this.selNodes]]] : [];
-      } else {
-        targets = this.selectedShapes().flatMap((s) => s.contours.map((c, k) => [s, k, [...c.pts.keys()]]));
-      }
-      return targets.map(([s, k, idx]) => {
-        const c = s.contours[k];
-        return { s, k, idx, saved: { pts: c.pts.map((p) => p.slice()), hin: c.hin.map((q) => q && q.slice()), hout: c.hout.map((q) => q && q.slice()) } };
-      });
+      const targets = this.editing
+        ? (this.selNodes.size ? [[this.contour, [...this.selNodes]]] : [])
+        : this.selectedShapes().flatMap((s) => s.children.map((c) => [c, c.segments.map((_, i) => i)]));
+      return targets.map(([path, idx]) => ({ path, saved: S.snapshot(path, idx) }));
     }
+
+    static anchorsOf(items) { return items.flatMap((it) => it.saved.map((n) => n.point)); }
 
     /**
      * Mirror the selection (shapes, or nodes in Edit mode) about the centre of its bounding box.
-     * 'h' swaps left and right on the screen, 'v' swaps top and bottom; the screen's horizontal axis is world Y.
+     * 'h' swaps left and right on the screen, 'v' swaps top and bottom.
      */
     flip(direction) {
       if (this.mode !== 'design' || this.xform || this.draft || this.locked) return;
       const items = this.transformItems();
       if (!items.length) { this.hooks.message('Select something first.', false); return; }
-      const anchors = items.flatMap((it) => it.idx.map((i) => it.saved.pts[i]));
-      const axis = direction === 'h' ? 1 : 0;
-      const lo = Math.min(...anchors.map((p) => p[axis])), hi = Math.max(...anchors.map((p) => p[axis]));
-      const mirror = (p) => { const q = p.slice(); q[axis] = lo + hi - p[axis]; return q; };
-      for (const { s, k, idx, saved } of items) {
-        const c = s.contours[k];
-        for (const i of idx) {
-          c.pts[i] = mirror(saved.pts[i]);
-          c.hin[i] = saved.hin[i] && mirror(saved.hin[i]);
-          c.hout[i] = saved.hout[i] && mirror(saved.hout[i]);
-        }
-      }
+      const box = Canvas.anchorsOf(items).reduce((r, p) => (r ? r.include(p) : new Rectangle(p, p)), null);
+      const m = new Matrix().scale(direction === 'h' ? -1 : 1, direction === 'v' ? -1 : 1, box.center);
+      for (const { path, saved } of items) S.applySnapshot(path, saved, (p) => m.transform(p));
       this.commit();
     }
 
@@ -457,47 +406,38 @@
       if (this.mode !== 'design' || this.xform || this.draft || this.locked) return;
       const items = this.transformItems();
       if (!items.length) { this.hooks.message('Select something first.', false); return; }
-      const anchors = items.flatMap((it) => it.idx.map((i) => it.saved.pts[i]));
-      const pivot = [anchors.reduce((a, p) => a + p[0], 0) / anchors.length, anchors.reduce((a, p) => a + p[1], 0) / anchors.length];
-      this.xform = { mode, items, pivot, start: this.s2w(...this.pointer), probe: anchors[0], axis: null, extrude: !!extrude };
+      const anchors = Canvas.anchorsOf(items);
+      const pivot = anchors.reduce((a, p) => a.add(p), new Point(0, 0)).divide(anchors.length);
+      this.xform = { mode, items, pivot, start: this.s2p(this.pointer), probe: anchors[0], axis: null, extrude: !!extrude };
     }
 
+    /** Lock to a world axis: 'x' is screen-vertical, 'y' screen-horizontal. */
     setAxis(axis) {
       if (!this.xform) return;
       this.xform.axis = this.xform.axis === axis ? null : axis;
-      this.updateTransform(this.s2w(...this.pointer));
+      this.updateTransform(this.s2p(this.pointer));
     }
 
     updateTransform(cursor) {
       const x = this.xform, { pivot, start, axis } = x;
-      let move;
+      let m;
       if (x.mode === 'grab') {
-        let delta = G.sub(cursor, start);
+        let delta = cursor.subtract(start);
         if (this.snapOn) {
-          const moving = new Set(x.items.map((it) => it.s));
-          delta = G.sub(this.snap(G.add(x.probe, delta), moving), x.probe);
+          const moving = new Set(x.items.map((it) => it.path.parent));
+          delta = this.snap(x.probe.add(delta), moving).subtract(x.probe);
         }
-        if (axis === 'x') delta[1] = 0; else if (axis === 'y') delta[0] = 0;
-        move = (p) => G.add(p, delta);
+        if (axis === 'x') delta = new Point(0, delta.y); else if (axis === 'y') delta = new Point(delta.x, 0);
+        m = new Matrix().translate(delta);
       } else if (x.mode === 'scale') {
-        const r0 = G.dist(start, pivot), r1 = G.dist(cursor, pivot);
-        const k = r0 > 1e-9 ? r1 / r0 : 1;
-        const kx = axis === 'y' ? 1 : k, ky = axis === 'x' ? 1 : k;
-        move = (p) => [pivot[0] + (p[0] - pivot[0]) * kx, pivot[1] + (p[1] - pivot[1]) * ky];
+        const r0 = start.getDistance(pivot), k = r0 > 1e-9 ? cursor.getDistance(pivot) / r0 : 1;
+        m = new Matrix().scale(axis === 'x' ? 1 : k, axis === 'y' ? 1 : k, pivot);
       } else {
-        const turn = Math.atan2(cursor[1] - pivot[1], cursor[0] - pivot[0]) - Math.atan2(start[1] - pivot[1], start[0] - pivot[0]);
-        const cos = Math.cos(turn), sin = Math.sin(turn);
-        move = (p) => { const dx = p[0] - pivot[0], dy = p[1] - pivot[1]; return [pivot[0] + dx * cos - dy * sin, pivot[1] + dx * sin + dy * cos]; };
+        const turn = cursor.subtract(pivot).angle - start.subtract(pivot).angle;
+        m = new Matrix().rotate(turn, pivot);
       }
-      for (const { s, k, idx, saved } of x.items) {
-        const c = s.contours[k];
-        for (const i of idx) {
-          c.pts[i] = move(saved.pts[i]);
-          c.hin[i] = saved.hin[i] && move(saved.hin[i]);
-          c.hout[i] = saved.hout[i] && move(saved.hout[i]);
-        }
-      }
-      this.render();
+      for (const { path, saved } of x.items) S.applySnapshot(path, saved, (p) => m.transform(p));
+      this.touch();
     }
 
     finishTransform(confirm) {
@@ -505,132 +445,126 @@
       this.xform = null;
       if (!x) return;
       if (!confirm && x.extrude) { this.restoreHistory(); return; }
-      if (!confirm) {
-        for (const { s, k, idx, saved } of x.items) {
-          const c = s.contours[k];
-          for (const i of idx) { c.pts[i] = saved.pts[i]; c.hin[i] = saved.hin[i]; c.hout[i] = saved.hout[i]; }
-        }
-      }
+      if (!confirm) for (const { path, saved } of x.items) S.restoreSnapshot(path, saved);
       this.commit();
     }
 
     // ---- snapping --------------------------------------------------------------
 
+    /** Snap a Paper-frame point to the nearest vertex of another shape, else to the grid. */
     snap(p, exclude) {
-      if (!this.snapOn) return p.slice();
-      const reach = (PICK_PX * 2) / this.view.s;
+      if (!this.snapOn) return p.clone();
+      const reach = (PICK_PX * 2) / this.zoom;
       let best = null, bd = Infinity;
       for (const s of this.shapes) {
         if (exclude && exclude.has(s)) continue;
-        for (const c of s.contours) for (const q of c.pts) { const d = G.dist(q, p); if (d < bd) { bd = d; best = q; } }
+        for (const c of s.children) for (const seg of c.segments) { const d = seg.point.getDistance(p); if (d < bd) { bd = d; best = seg.point; } }
       }
-      if (best && bd <= reach) return best.slice();
+      if (best && bd <= reach) return best.clone();
       const step = this.gridStep();
-      return [Math.round(p[0] / step) * step, Math.round(p[1] / step) * step];
+      return new Point(Math.round(p.x / step) * step, Math.round(p.y / step) * step);
     }
 
     // ---- hit testing -------------------------------------------------------------
 
-    rings(sh) { return sh.contours.map((c, k) => G.flatten(c, k > 0 || sh.kind === 'polygon').map((p) => this.w2s(p))); }
-
     hitShape(sp) {
-      let best = null, bd = PICK_PX;
+      const p = this.s2p(sp), tolerance = PICK_PX / this.zoom;
       for (let n = this.shapes.length - 1; n >= 0; n--) {
         const sh = this.shapes[n];
-        const rings = this.rings(sh);
-        let d = Infinity;
-        rings.forEach((r, k) => {
-          const closed = k > 0 || sh.kind === 'polygon';
-          for (let i = 0; i < r.length - 1; i++) d = Math.min(d, G.distToSegment(sp, r[i], r[i + 1]));
-          if (closed && r.length > 1) d = Math.min(d, G.distToSegment(sp, r[r.length - 1], r[0]));
-        });
-        if (sh.kind === 'polygon' && G.pointInRings(sp, rings)) d = 0;
-        if (d < bd || (d === 0 && bd > 0)) { bd = d; best = sh; if (d === 0) break; }
+        // The outline within a few pixels, or the inside of a polygon (holes excluded: its fill rule is even-odd).
+        if (sh.hitTest(p, { stroke: true, fill: false, tolerance }) || (sh.data.kind === 'polygon' && sh.contains(p))) return sh;
       }
-      return best;
+      return null;
     }
 
     hitNode(sp) {
       const c = this.contour;
       if (!c) return null;
       let best = null, bd = PICK_PX + 2;
-      c.pts.forEach((p, i) => { const d = G.dist(this.w2s(p), sp); if (d <= bd) { bd = d; best = i; } });
+      c.segments.forEach((s, i) => { const d = this.view.projectToView(s.point).getDistance(pt(sp)); if (d <= bd) { bd = d; best = i; } });
       return best;
     }
 
+    /** Handles of the selected nodes; a node without a handle gets a "ghost" pointing at its neighbour. */
     controlPoints() {
-      const sh = this.editing;
-      if (!sh) return [];
-      const c = this.contour, n = c.pts.length, closed = sh.kind === 'polygon' || sh.active > 0;
-      const out = [];
+      const c = this.contour;
+      if (!c) return [];
+      const n = c.segments.length, closed = c.closed, out = [];
       for (const i of this.selNodes) {
-        for (const [side, handles, j, exists] of [['in', c.hin, i - 1, closed || i > 0], ['out', c.hout, i + 1, closed || i < n - 1]]) {
+        const s = c.segments[i];
+        for (const [side, handle, j, exists] of [['in', s.handleIn, i - 1, closed || i > 0], ['out', s.handleOut, i + 1, closed || i < n - 1]]) {
           if (!exists) continue;
-          if (handles[i]) { out.push({ i, side, p: handles[i], ghost: false }); continue; }
-          const toward = G.sub(c.pts[(j + n) % n], c.pts[i]);
-          const norm = Math.hypot(...toward) || 1;
-          out.push({ i, side, p: G.add(c.pts[i], G.mul(toward, GHOST_PX / this.view.s / norm)), ghost: true });
+          if (S.hasHandle(handle)) { out.push({ i, side, p: s.point.add(handle), ghost: false }); continue; }
+          const toward = c.segments[(j + n) % n].point.subtract(s.point);
+          out.push({ i, side, p: s.point.add(toward.length ? toward.normalize(GHOST_PX / this.zoom) : toward), ghost: true });
         }
       }
       return out;
     }
 
     hitControl(sp) {
-      return this.controlPoints().find((c) => G.dist(this.w2s(c.p), sp) <= PICK_PX) || null;
+      return this.controlPoints().find((k) => this.view.projectToView(k.p).getDistance(pt(sp)) <= PICK_PX) || null;
     }
 
+    /** Index of another contour of the edited shape near the screen point, if any. */
     contourAt(sp) {
-      const sh = this.editing;
-      for (let k = 0; k < sh.contours.length; k++) {
-        if (k === sh.active) continue;
-        const r = G.flatten(sh.contours[k], k > 0 || sh.kind === 'polygon').map((p) => this.w2s(p));
-        for (let i = 0; i < r.length; i++) if (G.distToSegment(sp, r[i], r[(i + 1) % r.length]) <= PICK_PX) return k;
-      }
-      return null;
+      const sh = this.editing, p = this.s2p(sp), tolerance = PICK_PX / this.zoom;
+      const k = sh.children.findIndex((c, i) => i !== sh.data.active && c.hitTest(p, { stroke: true, fill: false, tolerance }));
+      return k < 0 ? null : k;
     }
 
     // ---- pen tool -----------------------------------------------------------------
 
-    cancelDraft() { this.draft = null; this.penDrag = null; }
+    cancelDraft() {
+      if (this.draft) this.draft.path.remove();
+      this.draft = null;
+      this.penDrag = null;
+    }
 
     finishDraft(trailing) {
       const d = this.draft;
       this.draft = null;
       this.penDrag = null;
       if (!d) return;
-      const c = d.contours[0];
-      if (trailing && d.kind === 'polyline') { c.pts.pop(); c.hin.pop(); c.hout.pop(); c.types.pop(); }
-      if (c.pts.length < (d.kind === 'polygon' ? 3 : 2)) { this.render(); return; }
-      G.fit(c);
-      this.shapes.push(d);
-      const closed = d.kind === 'polygon';
-      const merge = this.newOp === 'merge' && closed;
+      const path = d.path;
+      path.remove();
+      const polygon = d.kind === 'polygon';
+      if (trailing && !polygon) { path.removeSegment(path.segments.length - 1); d.types.pop(); }
+      if (path.segments.length < S.MIN_NODES[polygon ? 'polygon' : 'polyline']) { this.render(); return; }
+      // A clean path: the draft's dashed style must not leak into the shape.
+      const clean = new Path({ segments: path.segments.map((s) => s.clone()), insert: false });
+      clean.data = { types: d.types.slice(0, clean.segments.length) };
+      const shape = S.makeShape(d.kind, [clean], d.op);
+      this.layers.shapes.addChild(shape);
+      this.shapes.push(shape);
+      const merge = this.newOp === 'merge' && polygon;
       this.setTool('select');
-      this.sel = new Set([d]);
+      this.sel = new Set([shape]);
       this.commit();
       if (merge) this.hooks.merge(this.dicts(), this.shapes.length - 1);
-      else if (this.shapes.includes(d)) this.enterEdit();
+      else if (this.shapes.includes(shape)) this.enterEdit();
     }
 
-    penPress(wp, sp) {
+    penPress(p) {
       const op = this.newOp === 'merge' ? 'add' : this.newOp;
-      const point = this.snap(wp);
+      const point = this.snap(p);
       if (this.draft) {
-        const c = this.draft.contours[0];
-        if (c.pts.length >= 4 && G.dist(c.pts[0], point) <= (PICK_PX * 2) / this.view.s) {
-          for (const k of ['pts', 'hin', 'hout', 'types']) c[k].pop();
-          this.draft.kind = 'polygon';
-          this.draft.op = op;
+        const d = this.draft, c = d.path, segs = c.segments;
+        if (segs.length >= 4 && segs[0].point.getDistance(point) <= (PICK_PX * 2) / this.zoom) {
+          c.removeSegment(segs.length - 1);
+          d.types.pop();
+          d.kind = 'polygon';
+          d.op = op;
           this.finishDraft(false);
           return;
         }
-        c.pts[c.pts.length - 1] = point;
-        c.pts.push(point.slice()); c.hin.push(null); c.hout.push(null); c.types.push('sharp');
-        this.penDrag = c.pts.length - 2;
+        segs[segs.length - 1].point = point;
+        c.add(point.clone());
+        d.types.push('sharp');
+        this.penDrag = c.segments.length - 2;
       } else {
-        const c = G.makeContour([point, point], [], [], ['sharp', 'sharp']);
-        this.draft = G.makeShape('polyline', [c], op);
-        this.draft.pendingOp = op;
+        const path = new Path({ segments: [point, point.clone()], strokeColor: op === 'subtract' ? RED : INK, parent: this.layers.draft });
+        this.draft = { path, kind: 'polyline', op, types: ['sharp', 'sharp'] };
         this.penDrag = 0;
       }
       this.render();
@@ -642,18 +576,18 @@
       const r = this.rubber;
       this.rubber = null;
       if (!r) return;
-      const rect = [Math.min(r.a[0], r.b[0]), Math.min(r.a[1], r.b[1]), Math.max(r.a[0], r.b[0]), Math.max(r.a[1], r.b[1])];
-      if (rect[2] - rect[0] < 3 && rect[3] - rect[1] < 3) { if (!add) this.deselectAll(); this.render(); return; }
+      const rect = new Rectangle(pt(r.a), pt(r.b));
+      if (rect.width < 3 && rect.height < 3) { if (!add) this.deselectAll(); this.render(); return; }
       if (this.editing) {
-        const c = this.contour, hit = [];
-        c.pts.forEach((p, i) => { const q = this.w2s(p); if (q[0] >= rect[0] && q[0] <= rect[2] && q[1] >= rect[1] && q[1] <= rect[3]) hit.push(i); });
+        const hit = [];
+        this.contour.segments.forEach((s, i) => { if (rect.contains(this.view.projectToView(s.point))) hit.push(i); });
         this.selNodes = add ? new Set([...this.selNodes, ...hit]) : new Set(hit);
       } else {
-        const hit = this.shapes.filter((sh) => this.rings(sh).some((r2, k) => {
-          const closed = k > 0 || sh.kind === 'polygon';
-          for (let i = 0; i < r2.length - (closed ? 0 : 1); i++) if (G.segmentHitsRect(r2[i], r2[(i + 1) % r2.length], rect)) return true;
-          return false;
-        }));
+        const area = new Rectangle(this.s2p(rect.topLeft), this.s2p(rect.bottomRight));
+        const frame = new Path.Rectangle({ rectangle: area, insert: false });
+        const touches = (sh) => sh.bounds.intersects(area)
+          && sh.children.some((c) => area.contains(c.firstSegment.point) || c.getIntersections(frame).length > 0);
+        const hit = this.shapes.filter(touches);
         this.sel = add ? new Set([...this.sel, ...hit]) : new Set(hit);
       }
       this.hooks.selectionChanged();
@@ -663,42 +597,41 @@
     // ---- events -----------------------------------------------------------------------
 
     _bind() {
-      const svg = this.svg;
-      const local = (e) => { const r = svg.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
-      svg.addEventListener('contextmenu', (e) => e.preventDefault());
-      svg.addEventListener('pointerenter', () => { const a = document.activeElement; if (!a || !/INPUT|TEXTAREA|SELECT/.test(a.tagName)) svg.focus({ preventScroll: true }); });
+      const el = this.el;
+      const local = (e) => { const r = el.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+      el.addEventListener('contextmenu', (e) => e.preventDefault());
+      el.addEventListener('pointerenter', () => { const a = document.activeElement; if (!a || !/INPUT|TEXTAREA|SELECT/.test(a.tagName)) el.focus({ preventScroll: true }); });
 
-      svg.addEventListener('pointerdown', (e) => {
-        svg.focus({ preventScroll: true });
-        try { svg.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events have no active pointer */ }
-        const sp = local(e), wp = this.s2w(...sp);
+      el.addEventListener('pointerdown', (e) => {
+        el.focus({ preventScroll: true });
+        try { el.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events have no active pointer */ }
+        const sp = local(e), p = this.s2p(sp);
         this.pointer = sp;
         if (this.xform) { if (e.button === 0 || e.button === 2) this.finishTransform(e.button === 0); return; }
-        if (e.button === 1 || (this.mode !== 'design' && e.button === 0)) { this.pan = { from: sp, view: { ...this.view } }; svg.style.cursor = 'grabbing'; return; }
+        if (e.button === 1 || (this.mode !== 'design' && e.button === 0)) { this.pan = { from: sp, center: this.view.center.clone() }; el.style.cursor = 'grabbing'; return; }
         if (this.mode !== 'design' || this.locked) return;
         if (e.button === 2) { if (this.draft) this.finishDraft(true); return; }
         if (e.button !== 0) return;
-        if (this.tool === 'pen') { this.penPress(wp, sp); return; }
+        if (this.tool === 'pen') { this.penPress(p); return; }
         if (this.editing) {
+          const c = this.contour, types = S.typesOf(c);
           const ctl = this.hitControl(sp);
           if (ctl) {
-            const c = this.contour;
-            if (e.altKey && ['smooth', 'symmetric'].includes(c.types[ctl.i])) c.types[ctl.i] = 'free';
-            this.drag = { kind: 'control', i: ctl.i, side: ctl.side, paired: ['smooth', 'symmetric'].includes(c.types[ctl.i]), offset: G.sub(ctl.p, wp) };
+            if (e.altKey && ['smooth', 'symmetric'].includes(types[ctl.i])) types[ctl.i] = 'free';
+            this.drag = { kind: 'control', i: ctl.i, side: ctl.side, paired: ['smooth', 'symmetric'].includes(types[ctl.i]), offset: ctl.p.subtract(p) };
             return;
           }
           const node = this.hitNode(sp);
           if (node !== null) {
             if (e.shiftKey) { this.selNodes.has(node) ? this.selNodes.delete(node) : this.selNodes.add(node); }
             else if (!this.selNodes.has(node)) this.selNodes = new Set([node]);
-            const c = this.contour;
-            this.drag = { kind: 'nodes', start: wp, saved: [...this.selNodes].map((i) => [i, c.pts[i].slice(), c.hin[i] && c.hin[i].slice(), c.hout[i] && c.hout[i].slice()]), moved: false };
+            this.drag = { kind: 'nodes', start: p, saved: S.snapshot(c, [...this.selNodes]), moved: false };
             this.hooks.selectionChanged();
             this.render();
             return;
           }
           const other = this.contourAt(sp);
-          if (other !== null) { this.editing.active = other; this.selNodes.clear(); this.hooks.selectionChanged(); this.render(); return; }
+          if (other !== null) { this.editing.data.active = other; this.selNodes.clear(); this.hooks.selectionChanged(); this.render(); return; }
           this.rubber = { a: sp, b: sp, add: e.shiftKey };
           return;
         }
@@ -706,45 +639,47 @@
         if (hit) {
           if (e.shiftKey) { this.sel.has(hit) ? this.sel.delete(hit) : this.sel.add(hit); }
           else if (!this.sel.has(hit)) this.sel = new Set([hit]);
-          const moving = this.selectedShapes();
-          this.drag = { kind: 'shapes', start: wp, moved: false, saved: moving.map((s) => [s, s.contours.map(G.copyContour)]) };
+          this.drag = { kind: 'shapes', start: p, moved: false, items: this.transformItems() };
           this.hooks.selectionChanged();
           this.render();
         } else this.rubber = { a: sp, b: sp, add: e.shiftKey };
       });
 
-      svg.addEventListener('pointermove', (e) => {
-        const sp = local(e), wp = this.s2w(...sp);
+      el.addEventListener('pointermove', (e) => {
+        const sp = local(e), p = this.s2p(sp);
         this.pointer = sp;
-        this.hooks.cursor(wp[0], wp[1]);
+        const w = S.toWorld(p);
+        this.hooks.cursor(w[0], w[1]);
         if (this.pan) {
-          const v = this.pan.view;
-          this.view = { s: v.s, ox: v.ox + sp[0] - this.pan.from[0], oy: v.oy + sp[1] - this.pan.from[1] };
+          this.view.center = this.pan.center.subtract(new Point(sp[0] - this.pan.from[0], sp[1] - this.pan.from[1]).divide(this.zoom));
           this.render();
           return;
         }
-        if (this.xform) { this.updateTransform(wp); return; }
-        if (this.drag) { this.dragTo(wp, e); return; }
+        if (this.xform) { this.updateTransform(p); return; }
+        if (this.drag) { this.dragTo(p); return; }
         if (this.rubber) { this.rubber.b = sp; this.render(); return; }
         if (this.mode === 'design' && this.tool === 'pen') {
-          const point = this.snap(wp);
+          const point = this.snap(p);
           this.indicator = this.snapOn ? point : null;
           const d = this.draft;
-          if (d && this.penDrag !== null && (e.buttons & 1)) {
-            const c = d.contours[0], i = this.penDrag;
-            if (this.penType !== 'sharp' && i < c.pts.length - 1 && G.dist(c.pts[i], wp) > 3 / this.view.s) {
-              c.hout[i] = wp;
-              c.hin[i] = this.penType === 'free' ? null : G.sub(G.mul(c.pts[i], 2), wp);
-              c.types[i] = this.penType;
-            }
-          } else if (d) { const c = d.contours[0]; c.pts[c.pts.length - 1] = point; }
+          if (d) {
+            const c = d.path, segs = c.segments;
+            if (this.penDrag !== null && (e.buttons & 1)) {
+              const i = this.penDrag;
+              if (this.penType !== 'sharp' && i < segs.length - 1 && segs[i].point.getDistance(p) > 3 / this.zoom) {
+                segs[i].handleOut = p.subtract(segs[i].point);
+                segs[i].handleIn = this.penType === 'free' ? new Point(0, 0) : segs[i].point.subtract(p);
+                d.types[i] = this.penType;
+              }
+            } else segs[segs.length - 1].point = point;
+          }
           this.render();
         }
       });
 
-      svg.addEventListener('pointerup', (e) => {
+      el.addEventListener('pointerup', () => {
         this.penDrag = null;
-        if (this.pan) { this.pan = null; svg.style.cursor = this.tool === 'pen' && this.mode === 'design' ? 'crosshair' : 'default'; return; }
+        if (this.pan) { this.pan = null; el.style.cursor = this.tool === 'pen' && this.mode === 'design' ? 'crosshair' : 'default'; return; }
         if (this.xform) return;
         if (this.drag) {
           const d = this.drag;
@@ -755,103 +690,52 @@
         if (this.rubber) this.finishRubber(this.rubber.add);
       });
 
-      svg.addEventListener('dblclick', (e) => {
+      el.addEventListener('dblclick', (e) => {
         if (this.draft) { this.finishDraft(true); return; }
         if (this.editing && this.tool === 'select' && this.mode === 'design') {
-          const sp = local(e), wp = this.s2w(...sp), c = this.contour;
-          if (c.pts.every((q) => G.dist(this.w2s(q), sp) > PICK_PX * 1.5)) {
-            const added = this.insertNode(this.editing, c, wp, PICK_PX / this.view.s);
+          const sp = local(e), c = this.contour;
+          if (c.segments.every((s) => this.view.projectToView(s.point).getDistance(pt(sp)) > PICK_PX * 1.5)) {
+            const added = S.insertNode(c, this.s2p(sp), PICK_PX / this.zoom);
             if (added !== null) { this.selNodes = new Set([added]); this.commit(); this.hooks.selectionChanged(); }
           }
         }
       });
 
-      svg.addEventListener('wheel', (e) => {
+      // The wheel always zooms about the cursor, with no modifier; panning is a middle-button drag.
+      el.addEventListener('wheel', (e) => {
         e.preventDefault();
-        const sp = local(e);
-        const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && e.wheelDeltaY && e.wheelDeltaY % 120 === 0);
-        if (mouseWheel) {
-          // Mouse wheel: zoom; Shift pans vertically and Ctrl horizontally, like Blender.
-          const delta = e.deltaY || e.deltaX;
-          if (!delta) return;
-          if (e.shiftKey) this.view.oy -= delta * (e.deltaMode ? 20 : 1);
-          else if (e.ctrlKey) this.view.ox -= delta * (e.deltaMode ? 20 : 1);
-          else return this.zoomAt(sp, Math.exp(-delta * (e.deltaMode === 0 ? 0.0015 : 0.05)));
-          this.render();
-        } else if (e.ctrlKey) {
-          this.zoomAt(sp, Math.exp(-e.deltaY * 0.01)); // trackpad pinch
-        } else {
-          const [dx, dy] = this.panDelta(e); // trackpad two-finger scroll pans
-          this.view.ox -= dx;
-          this.view.oy -= dy;
-          this.render();
-        }
+        const delta = e.deltaY || e.deltaX;
+        if (!delta) return;
+        const rate = e.ctrlKey ? 0.01 : e.deltaMode === 0 ? 0.0015 : 0.05; // ctrl + wheel is a Chromium / WebView2 pinch
+        this.zoomAt(local(e), Math.exp(-delta * rate));
       }, { passive: false });
+
+      // WebKit (macOS) reports a trackpad pinch as gesture events whose scale is relative to the gesture's start.
+      let last = 1;
+      el.addEventListener('gesturestart', (e) => { e.preventDefault(); last = 1; });
+      el.addEventListener('gesturechange', (e) => { e.preventDefault(); this.zoomAt(local(e), e.scale / last); last = e.scale; });
+      el.addEventListener('gestureend', (e) => e.preventDefault());
     }
 
-    /**
-     * Trackpad pan delta with an axis lock per gesture. Fingers never move perfectly straight, so a horizontal drag
-     * also reports a few pixels of vertical motion on most events and the picture wobbles. The first few pixels of a
-     * gesture decide whether it is mostly horizontal, mostly vertical or diagonal; a straight gesture then ignores the
-     * other axis until a pause of 120 ms ends it (inertia events after lifting the fingers belong to the same gesture).
-     */
-    panDelta(e) {
-      let g = this.panGesture;
-      if (!g || e.timeStamp - g.last > 120) g = this.panGesture = { axis: null, ax: 0, ay: 0, last: 0 };
-      g.last = e.timeStamp;
-      if (!g.axis) {
-        g.ax += Math.abs(e.deltaX);
-        g.ay += Math.abs(e.deltaY);
-        if (g.ax + g.ay >= PAN_LOCK_PX) g.axis = g.ax > g.ay * PAN_LOCK_RATIO ? 'x' : g.ay > g.ax * PAN_LOCK_RATIO ? 'y' : 'free';
-      }
-      return [g.axis === 'y' ? 0 : e.deltaX, g.axis === 'x' ? 0 : e.deltaY];
-    }
-
-    /** Trackpad pinch: `value` is the relative size change, (x, y) the pinch centre in page pixels. */
-    pinch(value, x, y) {
-      const r = this.svg.getBoundingClientRect();
-      this.zoomAt([x - r.left, y - r.top], Math.max(0.2, 1 + value));
-    }
-
-    /** Zoom by `factor` about the screen point `sp`. */
-    zoomAt(sp, factor) {
-      const s = Math.min(Math.max(this.view.s * factor, ZOOM[0]), ZOOM[1]);
-      const k = s / this.view.s;
-      this.view = { s, ox: sp[0] - (sp[0] - this.view.ox) * k, oy: sp[1] - (sp[1] - this.view.oy) * k };
-      this.render();
-    }
-
-    dragTo(wp, e) {
+    dragTo(p) {
       const d = this.drag;
       if (d.kind === 'control') {
-        this.moveControl(this.contour, d.i, d.side, G.add(wp, d.offset), d.paired);
+        S.moveControl(this.contour, d.i, d.side, p.add(d.offset), d.paired);
         d.moved = true;
       } else if (d.kind === 'nodes') {
-        const c = this.contour;
-        let delta = G.sub(wp, d.start);
-        if (d.saved.length === 1) delta = G.sub(this.snap(G.add(d.saved[0][1], delta), new Set([this.editing])), d.saved[0][1]);
-        for (const [i, p, a, b] of d.saved) {
-          c.pts[i] = G.add(p, delta);
-          c.hin[i] = a && G.add(a, delta);
-          c.hout[i] = b && G.add(b, delta);
-        }
-        d.moved = d.moved || G.dist(wp, d.start) * this.view.s > 2;
+        let delta = p.subtract(d.start);
+        if (d.saved.length === 1) delta = this.snap(d.saved[0].point.add(delta), new Set([this.editing])).subtract(d.saved[0].point);
+        S.applySnapshot(this.contour, d.saved, (q) => q.add(delta));
+        d.moved = d.moved || p.getDistance(d.start) * this.zoom > 2;
       } else if (d.kind === 'shapes') {
-        if (!d.moved && G.dist(wp, d.start) * this.view.s < 3) return;
+        if (!d.moved && p.getDistance(d.start) * this.zoom < 3) return;
         d.moved = true;
-        let delta = G.sub(wp, d.start);
-        const first = d.saved[0][1][0].pts[0];
-        if (this.snapOn) delta = G.sub(this.snap(G.add(first, delta), new Set(d.saved.map((x) => x[0]))), first);
-        for (const [s, saved] of d.saved) {
-          s.contours.forEach((c, k) => {
-            const o = saved[k];
-            c.pts = o.pts.map((p) => G.add(p, delta));
-            c.hin = o.hin.map((q) => q && G.add(q, delta));
-            c.hout = o.hout.map((q) => q && G.add(q, delta));
-          });
-        }
+        let delta = p.subtract(d.start);
+        const first = d.items[0].saved[0].point;
+        if (this.snapOn) delta = this.snap(first.add(delta), new Set(d.items.map((it) => it.path.parent))).subtract(first);
+        for (const { path, saved } of d.items) S.applySnapshot(path, saved, (q) => q.add(delta));
       }
-      this.render();
+      this.touch();
     }
 
     /** Key handling; returns true if the key was used. */
@@ -882,23 +766,6 @@
       if (this._frame) return;
       this._frame = requestAnimationFrame(() => { this._frame = 0; this.draw(); });
     }
-
-    contourD(c, closed) {
-      const P = (p) => this.w2s(p).map((v) => v.toFixed(2)).join(',');
-      const n = c.pts.length;
-      let d = 'M' + P(c.pts[0]);
-      for (let i = 0; i < (closed ? n : n - 1); i++) {
-        const j = (i + 1) % n, seg = G.segment(c, i, j);
-        d += seg ? `C${P(seg[1])} ${P(seg[2])} ${P(seg[3])}` : `L${P(c.pts[j])}`;
-      }
-      return d + (closed ? 'Z' : '');
-    }
-
-    shapeD(sh) { return sh.contours.map((c, k) => this.contourD(c, k > 0 || sh.kind === 'polygon')).join(''); }
-
-    ringD(ring) { return 'M' + ring.map((p) => this.w2s(p).map((v) => v.toFixed(2)).join(',')).join('L') + 'Z'; }
-
-    polyD(pts) { return 'M' + pts.map((p) => this.w2s(p).map((v) => v.toFixed(2)).join(',')).join('L'); }
 
     drawGrid() {
       const g = this.grid.getContext('2d'), dpr = window.devicePixelRatio || 1;
@@ -949,84 +816,111 @@
 
     draw() {
       this.drawGrid();
-      const accent = css('--accent') || '#f5b800';
-      const out = [];
-      const path = (d, stroke, w, extra) => out.push(`<path d="${d}" fill="none" stroke="${stroke}" stroke-width="${w}" ${extra || ''}/>`);
       const design = this.mode === 'design';
-
+      const L = this.layers;
+      L.fill.visible = L.shapes.visible = L.draft.visible = design;
+      L.plan.visible = !design;
       if (design) {
-        this.drawFill(out, accent);
-        const dim = this.editing ? 0.35 : 1;
-        for (const sh of this.shapes) {
-          const sub = sh.op === 'subtract';
-          const d = this.shapeD(sh);
-          const opacity = this.editing && sh !== this.editing ? dim : 1;
-          path(d, sub ? RED : INK, 1.2, `${sub ? 'stroke-dasharray="6 4"' : ''} opacity="${opacity}" stroke-linejoin="round"`);
-          if (this.sel.has(sh)) path(d, BLUE, 2.2, 'stroke-linejoin="round"');
-        }
-        if (this.draft) {
-          const c = this.draft.contours[0];
-          path(this.contourD(c, false), this.draft.pendingOp === 'subtract' ? RED : INK, 1.2, 'stroke-dasharray="5 3"');
-          c.pts.forEach((p, i) => { const q = this.w2s(p); if (i < c.pts.length - 1) out.push(`<rect x="${q[0] - 3}" y="${q[1] - 3}" width="6" height="6" fill="#fff" stroke="${BLUE}" stroke-width="1.5"/>`); });
-        }
-        if (this.editing) this.drawEdit(out);
-        if (this.indicator && this.tool === 'pen') { const q = this.w2s(this.indicator); out.push(`<circle cx="${q[0]}" cy="${q[1]}" r="6" fill="none" stroke="${INK}" stroke-width="2"/>`); }
-      } else if (this.preview) {
-        const pv = this.preview;
-        if (pv.region.length) out.push(`<path d="${pv.region.map((r) => this.ringD(r)).join('')}" fill="${accent}" fill-opacity="0.2" fill-rule="evenodd" stroke="none"/>`);
-        if (pv.transit.length) path(pv.transit.map((t) => this.polyD(t)).join(''), '#8a8f98', 1, 'stroke-dasharray="2 3"');
-        const good = pv.plan.filter((s) => !s.bad), bad = pv.plan.filter((s) => s.bad);
-        if (good.length) path(good.map((s) => this.polyD(s.pts)).join(''), INK, 1.2);
-        if (bad.length) path(bad.map((s) => this.polyD(s.pts)).join(''), RED, 2);
-        if (this.progress.length) path(this.progress.map((s) => this.polyD(s)).join(''), accent, 3, 'stroke-linejoin="round" stroke-linecap="round"');
-        const o = this.w2s(pv.origin);
-        out.push(`<circle cx="${o[0]}" cy="${o[1]}" r="7" fill="none" stroke="${INK}" stroke-width="2"/>`);
+        this.restyle();
+        if (this.fillDirty) this.rebuildFill();
+        if (this.draft) { this.draft.path.strokeWidth = this.px(1.2); this.draft.path.dashArray = [this.px(5), this.px(3)]; }
+      } else if (this.strokeZoom !== this.zoom) {
+        this.strokeZoom = this.zoom;
+        for (const { item, width, dash } of this.planStrokes) { item.strokeWidth = this.px(width); item.dashArray = dash.map((d) => this.px(d)); }
       }
-      if (!design && this.marker) {
-        const q = this.w2s(this.marker);
-        out.push(`<path d="M${q[0] - 9},${q[1]}H${q[0] + 9}M${q[0]},${q[1] - 9}V${q[1] + 9}" stroke="${BLUE}" stroke-width="3" fill="none"/>`);
+      this.rebuildOverlay();
+      this.view.update();
+    }
+
+    /** Stroke of every shape: black, red dashed when it subtracts, brown when selected, faded behind an edited shape. */
+    restyle() {
+      for (const sh of this.shapes) {
+        const sub = sh.data.op === 'subtract', sel = this.sel.has(sh) || sh === this.editing;
+        const dim = this.editing && sh !== this.editing;
+        const key = `${sub}|${sel}|${dim}|${sh.data.kind}|${this.zoom}`;
+        if (sh.data.sig === key) continue;
+        sh.data.sig = key;
+        sh.style = {
+          strokeColor: sel ? BLUE : sub ? RED : INK,
+          strokeWidth: this.px(sel ? 2.2 : 1.2),
+          strokeJoin: 'round',
+          dashArray: sub ? [this.px(6), this.px(4)] : [],
+          opacity: dim ? 0.35 : 1,
+          fillColor: null,
+        };
       }
-      if (this.rubber) {
-        const r = this.rubber;
-        out.push(`<rect x="${Math.min(r.a[0], r.b[0])}" y="${Math.min(r.a[1], r.b[1])}" width="${Math.abs(r.a[0] - r.b[0])}" height="${Math.abs(r.a[1] - r.b[1])}" fill="${BLUE}" fill-opacity="0.08" stroke="${BLUE}" stroke-width="1" stroke-dasharray="4 3"/>`);
-      }
-      this.svg.innerHTML = out.join('');
     }
 
     /**
-     * The yellow scan region: added shapes minus subtracted ones. Drawn here from the shapes (a mask cuts out the
-     * subtract shapes), so it follows a drag live; planning.py computes the same region for the scan itself.
+     * The yellow scan region: added shapes minus subtracted ones. Built from copies of the shapes, the subtracted
+     * ones cutting a hole (destination-out), so it follows a drag live; planning.py computes the same region for
+     * the scan itself.
      */
-    drawFill(out, accent) {
-      const adds = this.shapes.filter((s) => s.kind === 'polygon' && s.op !== 'subtract');
-      if (!adds.length) return;
-      const subs = this.shapes.filter((s) => s.kind === 'polygon' && s.op === 'subtract');
-      const mask = subs.length
-        ? `<mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="${this.W}" height="${this.H}"><rect width="${this.W}" height="${this.H}" fill="#fff"/>` +
-          subs.map((s) => `<path d="${this.shapeD(s)}" fill="#000" fill-rule="evenodd"/>`).join('') + '</mask>'
-        : '';
-      out.push(mask + `<g opacity="0.28" ${subs.length ? 'mask="url(#cut)"' : ''}>` +
-        adds.map((s) => `<path d="${this.shapeD(s)}" fill="${accent}" fill-rule="evenodd"/>`).join('') + '</g>');
+    rebuildFill() {
+      this.fillDirty = false;
+      const layer = this.layers.fill;
+      layer.removeChildren();
+      const polygons = this.shapes.filter((s) => s.data.kind === 'polygon');
+      if (!polygons.length) return;
+      const accent = css('--accent') || '#f5b800';
+      const group = new Group({ opacity: 0.28, parent: layer });
+      const copy = (s) => { const c = s.clone({ insert: false }); c.style = { strokeColor: null, fillRule: 'evenodd' }; return c; };
+      for (const s of polygons) {
+        if (s.data.op === 'subtract') continue;
+        const c = copy(s);
+        c.fillColor = accent;
+        group.addChild(c);
+      }
+      for (const s of polygons) {
+        if (s.data.op !== 'subtract') continue;
+        const c = copy(s);
+        c.fillColor = '#000000';
+        c.blendMode = 'destination-out';
+        group.addChild(c);
+      }
     }
 
-    drawEdit(out) {
-      const c = this.contour, sh = this.editing;
-      if (sh.active > 0 || sh.contours.length > 1) {
-        // The contour being edited is drawn thicker so a hole can be told from the outline.
-        out.push(`<path d="${this.contourD(c, sh.active > 0 || sh.kind === 'polygon')}" fill="none" stroke="${BLUE}" stroke-width="2" opacity="0.8"/>`);
+    /** Everything that is drawn at a fixed pixel size: nodes, handles, markers, the rubber band. Rebuilt per frame. */
+    rebuildOverlay() {
+      const layer = this.layers.overlay;
+      layer.removeChildren();
+      const px = 1 / this.zoom;
+      const stroke = { strokeColor: BLUE, strokeWidth: 1.5 * px, parent: layer };
+      const box = (p, size, fill) => new Path.Rectangle({ center: p, size: [size * px, size * px], fillColor: fill, ...stroke });
+      const dot = (p, r, fill) => new Path.Circle({ center: p, radius: r * px, fillColor: fill, ...stroke });
+      const line = (a, b, style) => new Path.Line({ from: a, to: b, parent: layer, ...style, strokeWidth: style.strokeWidth * px });
+
+      if (this.mode === 'design') {
+        if (this.editing) {
+          const sh = this.editing, c = this.contour;
+          if (sh.children.length > 1) { // the contour being edited is drawn thicker so a hole can be told from the outline
+            const hl = c.clone({ insert: false });
+            hl.style = { strokeColor: BLUE, strokeWidth: 2 * px, opacity: 0.8, fillColor: null, dashArray: [] };
+            layer.addChild(hl);
+          }
+          const ctl = this.controlPoints();
+          for (const k of ctl) line(c.segments[k.i].point, k.p, { strokeColor: BLUE, strokeWidth: 1 });
+          c.segments.forEach((s, i) => box(s.point, 8, this.selNodes.has(i) ? BLUE : '#fff'));
+          for (const k of ctl) dot(k.p, 4.5, k.ghost ? '#fff' : BLUE);
+        }
+        if (this.draft) {
+          const segs = this.draft.path.segments;
+          segs.forEach((s, i) => { if (i < segs.length - 1) box(s.point, 6, '#fff'); });
+        }
+        if (this.indicator && this.tool === 'pen') new Path.Circle({ center: this.indicator, radius: 6 * px, strokeColor: INK, strokeWidth: 2 * px, parent: layer });
+      } else if (this.preview) {
+        new Path.Circle({ center: S.toPaper(this.preview.origin), radius: 7 * px, strokeColor: INK, strokeWidth: 2 * px, parent: layer });
       }
-      const ctl = this.controlPoints();
-      for (const k of ctl) {
-        const a = this.w2s(c.pts[k.i]), b = this.w2s(k.p);
-        out.push(`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${BLUE}" stroke-width="1"/>`);
+      if (this.mode !== 'design' && this.marker) {
+        const q = S.toPaper(this.marker), r = 9 * px;
+        const style = { strokeColor: BLUE, strokeWidth: 3 };
+        line(q.add([-r, 0]), q.add([r, 0]), style);
+        line(q.add([0, -r]), q.add([0, r]), style);
       }
-      c.pts.forEach((p, i) => {
-        const q = this.w2s(p), on = this.selNodes.has(i);
-        out.push(`<rect x="${q[0] - 4}" y="${q[1] - 4}" width="8" height="8" fill="${on ? BLUE : '#fff'}" stroke="${BLUE}" stroke-width="1.5"/>`);
-      });
-      for (const k of ctl) {
-        const q = this.w2s(k.p);
-        out.push(`<circle cx="${q[0]}" cy="${q[1]}" r="4.5" fill="${k.ghost ? '#fff' : BLUE}" stroke="${BLUE}" stroke-width="1.5"/>`);
+      if (this.rubber) {
+        const r = new Rectangle(this.s2p(this.rubber.a), this.s2p(this.rubber.b));
+        const rect = new Path.Rectangle({ rectangle: r, strokeColor: BLUE, strokeWidth: px, dashArray: [4 * px, 3 * px], fillColor: BLUE, parent: layer });
+        rect.fillColor.alpha = 0.08;
       }
     }
 
@@ -1034,18 +928,11 @@
 
     /** Replace all shapes with a result from Python and select the shapes at `selected`. */
     replaceShapes(dicts, selected) {
-      this.cancelDraft();
-      this.exitEdit(true);
-      this.shapes = dicts.map(G.shapeFromDict).filter(Boolean);
+      this.load(dicts);
       this.sel = new Set((selected || []).map((i) => this.shapes[i]).filter(Boolean));
       this.hooks.selectionChanged();
       this.commit();
     }
-  }
-
-  function bounds(pts) {
-    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
-    return [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
   }
 
   root.Canvas = Canvas;
