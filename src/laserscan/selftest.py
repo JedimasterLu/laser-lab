@@ -1,7 +1,11 @@
 """Sanity check of an installed or bundled build (``laserscan --selftest``).
 
-Imports every lazily loaded module, plans a small scan through the API, then opens the real window, waits for the
-page to build itself and runs the page's own checks (Paper.js drawing, shape round trip) inside the web view.
+Imports every lazily loaded module, checks that the web page's files are present, plans a small scan through the
+API, then opens the real window, waits for the page to build itself and runs the page's own checks (Paper.js
+drawing, shape round trip) inside the web view.
+
+Set ``LASERSCAN_SELFTEST_HEADLESS=1`` to skip the window: the macOS runners of GitHub Actions have no usable window
+session (the web view never finishes loading there), so that job checks everything but the window.
 """
 
 from __future__ import annotations
@@ -19,6 +23,19 @@ MODULES = (
 )  # fmt: skip
 SQUARE = {"type": "path", "path": "M0,0L400,0L400,300L0,300Z", "op": "add"}
 PAGE_TIMEOUT_S = 90
+
+
+WEB_FILES = (
+    "index.html", "css/theme.css", "vendor/paper-core.min.js", "js/shapes.js", "js/canvas.js", "js/ui.js", "js/app.js",
+)  # fmt: skip
+
+
+def _check_assets() -> None:
+    from laserscan.desktop import WEB_DIR
+
+    missing = [name for name in WEB_FILES if not (WEB_DIR / name).is_file()]
+    if missing:
+        raise RuntimeError(f"web files missing from the build: {missing}")
 
 
 def _check_api() -> None:
@@ -78,8 +95,12 @@ def run() -> int:
     try:
         for name in MODULES:
             importlib.import_module(name)
+        _check_assets()
         _check_api()
-        _check_window()
+        if os.environ.get("LASERSCAN_SELFTEST_HEADLESS"):
+            print("window check skipped (LASERSCAN_SELFTEST_HEADLESS)")
+        else:
+            _check_window()
     except Exception:  # noqa: BLE001  (any failure is a failed self-test)
         print("SELFTEST FAILED")
         traceback.print_exc()
