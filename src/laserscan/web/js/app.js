@@ -4,14 +4,18 @@
   const $ = (id) => document.getElementById(id);
   const G = window.Geom;
 
-  function connectBridge() {
-    return new Promise((resolve) => new QWebChannel(qt.webChannelTransport, (ch) => resolve(ch.objects.bridge)));
+  /** pywebview injects `window.pywebview.api` (the Python `Api` object) and then fires `pywebviewready`. */
+  function connectApi() {
+    return new Promise((resolve) => {
+      if (window.pywebview && window.pywebview.api) resolve(window.pywebview.api);
+      else window.addEventListener('pywebviewready', () => resolve(window.pywebview.api), { once: true });
+    });
   }
 
   async function main() {
-    const bridge = await connectBridge();
-    const call = (name, ...args) => new Promise((resolve) => bridge[name](...args, resolve));
-    const cfg = JSON.parse(await call('init'));
+    const api = await connectApi();
+    const call = (name, ...args) => api[name](...args);
+    const cfg = await call('init');
     const app = { mode: 'design', running: false, wasRunning: false, origin: [0, 0], profileKey: '', connected: false, lastTraffic: 0 };
 
     $('version').textContent = 'v' + cfg.version;
@@ -114,7 +118,7 @@
       toolChanged: (tool) => { radio(['select', 'pen'], tool); syncNodeButtons(); },
       selectionChanged: () => syncNodeButtons(),
       merge: async (dicts, index) => {
-        const r = JSON.parse(await call('merge', JSON.stringify(dicts), index));
+        const r = await call('merge', dicts, index);
         if (r.message) notice(r.message, false);
         if (r.merged) canvas.replaceShapes(r.shapes, r.selected);
         else canvas.enterEdit();
@@ -128,15 +132,14 @@
     });
     const pickNodeType = (k) => (canvas.tool === 'pen' ? canvas.setPenType(k) : canvas.setNodeType(k));
     syncNodeButtons();
-    window.__canvas = canvas;
-    window.__pinch = (value, x, y) => canvas.pinch(value, x, y);
+    window.__canvas = canvas; // for the self-test
 
     /** Merge button: fuse the selected shapes now, or (nothing to fuse) make new shapes merge as they are drawn. */
     async function mergeAction() {
       if (app.mode !== 'design' || canvas.locked) return;
       if (canvas.sel.size < 2 || canvas.editing) { chooseOp('merge'); return; }
       const picked = canvas.shapes.map((s, i) => [s, i]).filter(([s]) => canvas.sel.has(s)).map(([, i]) => i);
-      const r = JSON.parse(await call('mergeSelected', JSON.stringify(canvas.dicts()), JSON.stringify(picked)));
+      const r = await call('merge_selected', canvas.dicts(), picked);
       if (r.message) notice(r.message, !r.merged);
       if (r.merged) canvas.replaceShapes(r.shapes, r.selected);
     }
@@ -172,7 +175,6 @@
       app.origin = r.origin;
       show($('estimate'), r.estimate);
       show($('alerts'), r.problems.join('\n'));
-      canvas.setRegion(r.region);
       const o = r.origin;
       const plan = r.plan.map((s) => ({ pts: s.p.map((p) => [p[0] + o[0], p[1] + o[1]]), laser: s.l, bad: s.bad }));
       const transit = [];
@@ -189,7 +191,7 @@
 
     async function replan() {
       const mine = ++token;
-      const r = JSON.parse(await call('replan', JSON.stringify(canvas.dicts()), JSON.stringify(params())));
+      const r = await call('replan', canvas.dicts(), params());
       if (mine === token) applyPlan(r);
     }
 
@@ -198,7 +200,7 @@
       if (app.running || mode === app.mode) return;
       radio(['design', 'preview'], mode);
       app.mode = mode;
-      if (mode === 'preview') await call('setView', mode);
+      if (mode === 'preview') await call('set_view', mode);
       await replan();
       canvas.setMode(mode);
       lockDesign(mode !== 'design');
@@ -232,7 +234,7 @@
       if (app.running) { show($('device-msg'), 'Abort the run first.'); return; }
       show($('device-msg'), '');
       $('connect').disabled = true;
-      const r = JSON.parse(await call(app.connected ? 'disconnectDevices' : 'connectDevices', stagePort.value || '', shutterPort.value || ''));
+      const r = await call(app.connected ? 'disconnect_devices' : 'connect_devices', stagePort.value || '', shutterPort.value || '');
       $('connect').disabled = false;
       if (r.error) show($('device-msg'), r.error);
       else if (r.note) show($('device-msg'), r.note);
@@ -242,11 +244,11 @@
     // ---- run controls ----------------------------------------------------------------
     $('start').addEventListener('click', async () => {
       notice('', false);
-      const r = JSON.parse(await call('start', JSON.stringify(canvas.dicts()), JSON.stringify(params()), app.mode));
+      const r = await call('start', canvas.dicts(), params(), app.mode);
       if (r.plan) applyPlan(r);
       if (r.error) notice(r.error, true);
     });
-    $('pause').addEventListener('click', () => call('togglePause'));
+    $('pause').addEventListener('click', () => call('toggle_pause'));
     $('abort').addEventListener('click', () => call('abort'));
 
     function onRunStart() {
@@ -327,12 +329,18 @@
       if (s.traffic.length) appendTraffic(s.traffic);
       if (s.deviceMsg !== undefined && s.deviceMsg !== app.deviceMsg) { app.deviceMsg = s.deviceMsg; show($('device-msg'), s.deviceMsg); }
     }
-    bridge.state.connect((text) => onState(JSON.parse(text)));
+    /** The page polls the state (10 Hz): it is thread-safe, and a slow page never piles up events. */
+    async function pollState() {
+      for (;;) {
+        try { onState(await call('state')); } catch (err) { console.error(err); }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
 
     // ---- files -----------------------------------------------------------------------
     async function openProject() {
       if (app.running) return;
-      const r = JSON.parse(await call('openProject'));
+      const r = await call('open_project');
       if (r.cancelled) return;
       if (r.error) { notice('Cannot open project: ' + r.error, true); return; }
       await setView('design');
@@ -342,13 +350,13 @@
       notice(r.differs ? 'The project was drawn for a different stage range than the connected stage.' : '', true);
     }
     async function saveProject(saveAs) {
-      const r = JSON.parse(await call('saveProject', JSON.stringify(canvas.dicts()), JSON.stringify(params()), !!saveAs));
+      const r = await call('save_project', canvas.dicts(), params(), !!saveAs);
       if (r.error) notice(r.error, true);
       else if (r.name) notice('Saved ' + r.name + '.', false);
     }
     async function importDrawing() {
       if (app.running || app.mode !== 'design') { notice('Switch to Design (and stop any run) to import.', true); return; }
-      const r = JSON.parse(await call('importDrawing'));
+      const r = await call('import_drawing');
       if (r.cancelled) return;
       if (r.error) { notice(r.error, true); return; }
       canvas.setShapes(canvas.dicts().concat(r.shapes), true);
@@ -358,7 +366,7 @@
     async function importBitmap() {
       if (app.running || app.mode !== 'design') { notice('Switch to Design (and stop any run) to import.', true); return; }
       if (document.querySelector('.modal-back')) return;
-      const r = JSON.parse(await call('openBitmap'));
+      const r = await call('open_bitmap');
       if (r.cancelled) return;
       if (r.error) { notice(r.error, true); return; }
       // Grey values for the live preview (the same pixels Python traces).
@@ -410,7 +418,7 @@
         const w = +q('bm-width').value;
         q('bm-size').textContent = w > 0 ? `${w} × ${(w * r.h / r.w).toFixed(1)} µm · ${(w / r.w).toFixed(3)} µm/px` : '';
       }
-      const close = () => { back.remove(); call('closeBitmap'); };
+      const close = () => { back.remove(); call('close_bitmap'); };
       ['bm-th', 'bm-invert', 'bm-width', 'bm-smooth'].forEach((id) => q(id).addEventListener('input', draw));
       q('bm-auto').addEventListener('click', () => { q('bm-th').value = r.otsu; draw(); });
       q('bm-cancel').addEventListener('click', close);
@@ -420,10 +428,10 @@
         q('bm-ok').disabled = true;
         q('bm-ok').textContent = 'Tracing…';
         await new Promise((resolve) => setTimeout(resolve, 30)); // let the button repaint before the blocking call
-        const t = JSON.parse(await call('traceBitmap', JSON.stringify({
+        const t = await call('trace_bitmap', {
           threshold: +q('bm-th').value, invert: q('bm-invert').checked, width: +q('bm-width').value,
           speckle: +q('bm-speck').value, smooth: +q('bm-smooth').value,
-        })));
+        });
         if (t.error) { show(q('bm-error'), t.error, true); q('bm-ok').disabled = false; q('bm-ok').textContent = 'Import'; return; }
         close();
         canvas.setShapes(canvas.dicts().concat(t.shapes), true);
@@ -434,7 +442,7 @@
       q('bm-ok').focus();
     }
     async function exportPlan() {
-      const r = JSON.parse(await call('exportPlan', JSON.stringify(canvas.dicts()), JSON.stringify(params())));
+      const r = await call('export_plan', canvas.dicts(), params());
       if (r.error) notice(r.error, true);
       else if (r.name) notice('Exported ' + r.name + ' (coordinates relative to the start position).', false);
     }
@@ -462,7 +470,7 @@
       ['Region', [['Alt+1 / Alt+2', 'New shapes add / subtract area'], ['Alt+3', 'Merge: fuse the selected shapes, or merge new shapes as drawn'], ['Shift+X', 'Invert Add / Subtract']]],
       ['Selection and edit', [['A / Alt+A', 'Select all / none'], ['Shift+H / Shift+V', 'Flip left-right / top-bottom (nodes in Edit)'], ['Mod+I', 'Invert the selection'], ['Shift+D', 'Duplicate'], ['Delete / X / Backspace', 'Delete'], ['Mod+Z / Mod+Shift+Z', 'Undo / redo'], ['Shift+Tab', 'Snap on / off']]],
       ['Transform', [['G / R / S', 'Grab / rotate / scale'], ['X / Y', 'Lock to an axis'], ['Click, Enter', 'Confirm'], ['Right-click, Esc', 'Cancel']]],
-      ['Mouse and trackpad', [['Wheel', `Zoom (${SYMBOL.Shift} / ${SYMBOL.Ctrl}: pan)`], ['Middle-drag', 'Pan'], ['Two-finger scroll', 'Pan'], ['Pinch', 'Zoom'], ['Press and drag', 'Box select']]],
+      ['Mouse and trackpad', [['Wheel', 'Zoom about the cursor'], ['Middle-drag', 'Pan'], ['Pinch', 'Zoom'], ['Press and drag', 'Box select']]],
       ['Files', [['Mod+O / Mod+S', 'Open / save'], ['Mod+Shift+S', 'Save as'], ['Mod+Shift+I', 'Import drawing: SVG, DXF, GDSII or CSV'], ['Mod+Shift+B', 'Import bitmap: PNG, JPEG, TIFF or WebP'], ['Mod+Shift+E', 'Export path: CSV, G-code or NPZ'], ['Mod+/', 'This guide']]],
     ];
     function closeGuide() { const g = document.querySelector('.modal-back'); if (g) g.remove(); }
@@ -498,7 +506,7 @@
       if (mod && code === 'Digit2') { e.preventDefault(); setView('preview'); return; }
       if (mod && code === 'KeyZ') { e.preventDefault(); e.shiftKey ? canvas.redo() : canvas.undo(); return; }
       if (mod && code === 'KeyY') { e.preventDefault(); canvas.redo(); return; }
-      if (document.activeElement !== canvas.svg) return;
+      if (document.activeElement !== canvas.el) return;
       if (canvas.key(e)) { e.preventDefault(); return; }
       if (code === 'Home') { e.preventDefault(); e.shiftKey ? canvas.fitStage() : canvas.fit(); return; }
       if (app.mode !== 'design' || canvas.locked) return;
@@ -531,8 +539,56 @@
     // ---- start -----------------------------------------------------------------------------
     document.querySelectorAll('[title]').forEach((el) => { el.title = platformText(el.title); });
     lockDesign(false);
+    /** Checks run inside the real web view by `laserscan --selftest`: Paper.js drawing, hit tests, undo, transforms. */
+    window.__selftest = () => {
+      const failures = [];
+      let passed = 0;
+      const check = (name, ok, extra) => { if (ok) passed++; else failures.push(name + (extra ? ` (${extra})` : '')); };
+      const before = canvas.dicts(), mode = canvas.mode;
+      try {
+        check('paper is loaded', typeof paper === 'object' && !!paper.version, String(window.paper));
+        check('design view', canvas.mode === 'design', canvas.mode);
+        const outer = { type: 'path', path: 'M-500,-500L500,-500L500,500L-500,500Z', op: 'add' };
+        const hole = { type: 'path', path: 'M-100,-100L100,-100L100,100L-100,100Z', op: 'subtract' };
+        canvas.setShapes([outer, hole], true);
+        canvas.fitRect(-600, 600, -600, 600);
+        canvas.draw();
+        const alphaAt = (world) => {
+          const [x, y] = canvas.w2s(world), dpr = window.devicePixelRatio || 1;
+          return canvas.el.getContext('2d').getImageData(Math.round(x * dpr), Math.round(y * dpr), 1, 1).data[3];
+        };
+        check('fill is drawn', alphaAt([300, 300]) > 0, String(alphaAt([300, 300])));
+        check('subtract cuts a hole', alphaAt([0, 0]) === 0, String(alphaAt([0, 0])));
+        check('hit test finds the outer shape', canvas.hitShape(canvas.w2s([300, 300])) === canvas.shapes[0]);
+        check('hit test finds the topmost shape', canvas.hitShape(canvas.w2s([0, 0])) === canvas.shapes[1]);
+        check('nothing outside', canvas.hitShape(canvas.w2s([900, 900])) === null);
+        canvas.selectAll();
+        canvas.deleteSelected();
+        check('delete', canvas.shapes.length === 0);
+        canvas.undo();
+        check('undo', canvas.shapes.length === 2 && JSON.stringify(canvas.dicts()) === JSON.stringify([outer, hole].map((d) => Shapes.shapeToDict(Shapes.shapeFromDict(d)))));
+        canvas.setShapes([{ type: 'path', path: 'M0,0L100,0L0,50Z', op: 'add' }], true);
+        const start = JSON.stringify(canvas.dicts());
+        canvas.selectAll();
+        canvas.flip('h');
+        check('flip changes the shape', JSON.stringify(canvas.dicts()) !== start);
+        canvas.flip('h');
+        check('flip twice restores it', JSON.stringify(canvas.dicts()) === start);
+      } catch (err) {
+        failures.push('exception: ' + (err && err.stack || err));
+      } finally {
+        canvas.setShapes(before, false);
+        canvas.history = [JSON.stringify(before)];
+        canvas.hidx = 0;
+        if (canvas.mode !== mode) canvas.setMode(mode);
+      }
+      return { passed, failures };
+    };
+
     await call('ready');
     replan();
+    pollState();
+    window.__ready = true;
   }
 
   window.addEventListener('DOMContentLoaded', main);

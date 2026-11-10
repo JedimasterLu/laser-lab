@@ -1,5 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec producing a one-folder LaserScan build.
+"""PyInstaller spec producing a one-folder LaserScan build for Windows.
+
+The window is pywebview on the system's Edge WebView2 runtime, so no browser engine is bundled.
 
 Build from the repository root with a runtime-only environment::
 
@@ -31,47 +33,14 @@ EXCLUDES = [
     "stable_baselines3",
     "trackpy",
     "pyglet",
-    "PySide6.QtQuick3D",
-    "PySide6.Qt3DCore",
-    "PySide6.QtMultimedia",
-    "PySide6.QtCharts",
-    "PySide6.QtDataVisualization",
-    "PySide6.QtPdf",
-    "PySide6.QtPdfWidgets",
-    "PySide6.QtDesigner",
-    "PySide6.QtSql",
-    "PySide6.QtTest",
+    # pywebview offers Qt / GTK / CEF back ends; Windows uses WebView2 only.
+    "PyQt5",
+    "PyQt6",
+    "PySide2",
+    "PySide6",
+    "gi",
+    "cefpython3",
 ]
-
-# Files inside the Qt tree that the app never loads.
-DROP_BINARIES = (
-    "opengl32sw.dll",  # 20 MB software OpenGL; Chromium renders through ANGLE/D3D
-    "Qt6Pdf",
-    "Qt6Designer",
-    "Qt6Quick3D",
-    "Qt63D",
-    "Qt6Charts",
-    "Qt6Multimedia",
-)
-DROP_DATAS = (
-    "qtwebengine_devtools_resources.pak",  # Chromium DevTools UI; the context menu is disabled
-)
-
-
-def keep_binary(entry):
-    name = Path(entry[0]).name
-    return not any(name.startswith(prefix) or name == prefix for prefix in DROP_BINARIES)
-
-
-def keep_data(entry):
-    dest = entry[0].replace("\\", "/")
-    name = dest.rsplit("/", 1)[-1]
-    if name in DROP_DATAS or name.endswith(".qm"):  # Qt translations
-        return False
-    if "/qtwebengine_locales/" in dest and name != "en-US.pak":  # Chromium needs only one locale
-        return False
-    return True
-
 
 a = Analysis(  # noqa: F821
     [str(ROOT / "packaging" / "launcher.py")],
@@ -87,8 +56,6 @@ a = Analysis(  # noqa: F821
     noarchive=False,
     optimize=2,  # strip asserts and docstrings from bytecode
 )
-a.binaries = [b for b in a.binaries if keep_binary(b)]
-a.datas = [d for d in a.datas if keep_data(d)]
 pyz = PYZ(a.pure)  # noqa: F821
 
 exe = EXE(  # noqa: F821

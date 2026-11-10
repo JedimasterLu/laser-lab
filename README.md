@@ -1119,22 +1119,74 @@ Camera and SLM usage above are the documented paths for the refactored Nikon DS-
 
 ---
 
-## LaserScan for Windows
+## LaserScan
 
-Releases are built by GitHub Actions ([build-windows.yml](.github/workflows/build-windows.yml)). Pushing a
-tag such as `v0.1.0` (it must match `laserscan.__version__`) builds a one-folder PyInstaller bundle,
-smoke-tests it (`LaserScan.exe --self-test` imports every lazily loaded module and loads the web UI in
-QtWebEngine), and attaches `LaserScan-<version>-windows-x64.zip` to the GitHub Release. Run the workflow
-manually to get the zip as a build artifact.
+Desktop app to draw scan paths (or fill areas) and run them on the lab's stage and shutter. It is a
+[pywebview](https://pywebview.flowrl.com/) window (Edge WebView2 on Windows, WKWebView on macOS) around a static
+HTML/JS page; there is no web server and no bundled browser engine.
 
-To build locally on Windows:
+```bash
+uv sync --extra scan
+uv run laserscan --simulate     # simulated stage and shutter; --debug opens the web inspector
+```
+
+Real instruments are only connected from Windows (default ports COM3 stage, COM6 shutter); elsewhere the app
+always runs simulated.
+
+### Layout
+
+| Part | Role |
+|---|---|
+| [src/laserscan/desktop.py](src/laserscan/desktop.py) | Creates the window, asks before closing mid-scan, closes the devices on exit. |
+| [src/laserscan/api.py](src/laserscan/api.py) | The `Api` object the page calls as `window.pywebview.api` (planning, devices, run control, file dialogs). Plain Python, testable without a window. |
+| [src/laserscan/planning.py](src/laserscan/planning.py), `shapeops.py`, `fileio.py`, `project.py` | Scan paths (shapely), merging, SVG/DXF/GDSII/bitmap import, project files. |
+| [src/laserscan/web/](src/laserscan/web/) | The page. `js/app.js` panels and shortcuts, `js/canvas.js` editor, `js/shapes.js` shape model. |
+| [src/laserscan/web/vendor/](src/laserscan/web/vendor/) | [Paper.js](https://paperjs.org) 0.12.18 (MIT), the vector graphics library behind the canvas. |
+
+Calls go from the page to Python (`await pywebview.api.replan(shapes, params)`); the page polls
+`api.state()` ten times a second for device and run state.
+
+The canvas is a Paper.js scene over a 2D canvas with the grid. Paper does the Bézier maths, hit tests, transforms
+and zoom/pan; `shapes.js` adds the node types (sharp / free / smooth / symmetric) and the project-file path format
+(absolute `M L C Z` strings in microns, unchanged, so older `.laserscan.json` files open). The view shows screen up
+as +X and screen right as +Y, so shapes live in Paper's frame `(Y, -X)`.
+
+### Tests
+
+```bash
+uv run --extra scan pytest tests/test_laserscan_api.py tests/test_laserscan_fileio.py
+cd tests/js && npm install && npm test      # the shape model, with the same Paper.js version
+uv run --extra scan laserscan --selftest    # opens the real window and runs the page's own checks
+```
+
+### Release builds
+
+Releases are built by GitHub Actions ([build.yml](.github/workflows/build.yml)). Pushing a tag such as `v0.2.0`
+(it must match `laserscan.__version__`) builds both apps, smoke-tests each (`--selftest` imports every lazily loaded
+module, plans a scan and runs the page's checks in the real web view) and attaches
+`LaserScan-<version>-windows-x64.zip` and `LaserScan-<version>-macos-arm64.zip` to the GitHub Release. Run the
+workflow manually to get the zips as build artifacts.
+
+- **Windows**: PyInstaller one-folder bundle ([packaging/laserscan.spec](packaging/laserscan.spec)). Needs the Edge
+  WebView2 runtime, preinstalled on current Windows. SmartScreen may warn about an unknown publisher.
+- **macOS** (Apple silicon): py2app `.app` ([packaging/setup_macos.py](packaging/setup_macos.py)), then
+  [postprocess_macos.py](packaging/postprocess_macos.py) adds package metadata, prunes test suites and thins to
+  arm64. It runs with simulated devices only (the stage and shutter are connected from Windows). The app is not
+  notarized: on first launch right-click, **Open** (or `xattr -cr LaserScan.app`).
+
+To build locally (py2app needs a python.org-style Python, not the standalone builds `uv` downloads):
 
 ```powershell
 uv sync --no-dev --extra scan --group build
-uv run --no-sync pyinstaller packaging/laserscan.spec --noconfirm   # output: dist/LaserScan/
+uv run --no-sync pyinstaller packaging/laserscan.spec --noconfirm   # Windows -> dist/LaserScan/
 ```
 
-Unzip and run `LaserScan.exe`. The windowed build has no console; console output and startup errors go to
-`%LOCALAPPDATA%\LaserScan\laserscan.log`. Size is kept down by excluding unused packages and Qt parts in
-[packaging/laserscan.spec](packaging/laserscan.spec) (translations, all Chromium locales but en-US, DevTools,
-software OpenGL) and by stripping docstrings from bytecode.
+```bash
+python -m pip install ".[scan]" py2app
+python packaging/make_icns.py
+(cd packaging && python setup_macos.py py2app --dist-dir ../dist)   # macOS -> dist/LaserScan.app
+python packaging/postprocess_macos.py dist/LaserScan.app
+```
+
+The windowed builds have no console; console output and startup errors go to `%LOCALAPPDATA%\LaserScan\laserscan.log`
+(`~/Library/Logs/LaserScan/laserscan.log` on macOS).

@@ -1,0 +1,7 @@
+{
+  "name": "laserscan-js-tests",
+  "private": true,
+  "description": "Tests of the browser-side shape model. paper must match src/laserscan/web/vendor/paper-core.min.js.",
+  "scripts": { "test": "node --test" },
+  "devDependencies": { "paper": "0.12.18" }
+}
