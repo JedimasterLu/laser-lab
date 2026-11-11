@@ -113,7 +113,7 @@
     canvas = new window.Canvas($('stage-wrap'), {
       changed: () => scheduleReplan(),
       message: (text, error) => notice(text, error),
-      scale: (um) => { $('grid-size').textContent = `Grid cell:${um >= 1000 ? um / 1000 + ' mm' : um + ' µm'}`; },
+      scale: (um) => { $('grid-size').textContent = `${um >= 1000 ? um / 1000 + ' mm' : um + ' µm'}`; },
       cursor: (x, y) => { $('cursor').textContent = `X ${x.toFixed(1)} µm   Y ${y.toFixed(1)} µm  (${frame()})`; },
       editChanged: (on) => { radio(['object', 'edit'], on ? 'edit' : 'object'); syncNodeButtons(); },
       toolChanged: (tool) => { radio(['select', 'pen'], tool); syncNodeButtons(); },
