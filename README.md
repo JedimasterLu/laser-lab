@@ -1139,7 +1139,7 @@ always runs simulated.
 |---|---|
 | [src/laserscan/desktop.py](src/laserscan/desktop.py) | Creates the window, asks before closing mid-scan, closes the devices on exit. |
 | [src/laserscan/api.py](src/laserscan/api.py) | The `Api` object the page calls as `window.pywebview.api` (planning, devices, run control, file dialogs). Plain Python, testable without a window. |
-| [src/laserscan/planning.py](src/laserscan/planning.py), `shapeops.py`, `fileio.py`, `project.py` | Scan paths (shapely), merging, SVG/DXF/GDSII/bitmap import, project files. |
+| [src/laserscan/planning.py](src/laserscan/planning.py), `shapeops.py`, `fileio.py` | Scan paths (shapely), merging, SVG/DXF/GDSII/bitmap import, SVG/DXF drawing export, CSV/G-code/NPZ path export. |
 | [src/laserscan/web/](src/laserscan/web/) | The page. `js/app.js` panels and shortcuts, `js/canvas.js` editor, `js/shapes.js` shape model. |
 | [src/laserscan/web/vendor/](src/laserscan/web/vendor/) | [Paper.js](https://paperjs.org) 0.12.18 (MIT), the vector graphics library behind the canvas. |
 
@@ -1147,8 +1147,8 @@ Calls go from the page to Python (`await pywebview.api.replan(shapes, params)`);
 `api.state()` ten times a second for device and run state.
 
 The canvas is a Paper.js scene over a 2D canvas with the grid. Paper does the Bézier maths, hit tests, transforms
-and zoom/pan; `shapes.js` adds the node types (sharp / free / smooth / symmetric) and the project-file path format
-(absolute `M L C Z` strings in microns, unchanged, so older `.laserscan.json` files open). The view shows screen up
+and zoom/pan; `shapes.js` adds the node types (sharp / free / smooth / symmetric) and the path format
+(absolute `M L C Z` strings in microns). The view shows screen up
 as +X and screen right as +Y, so shapes live in Paper's frame `(Y, -X)`.
 
 ### Tests

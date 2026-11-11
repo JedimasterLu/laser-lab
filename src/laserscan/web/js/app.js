@@ -113,6 +113,7 @@
     canvas = new window.Canvas($('stage-wrap'), {
       changed: () => scheduleReplan(),
       message: (text, error) => notice(text, error),
+      scale: (um) => { $('grid-size').textContent = `Grid cell:${um >= 1000 ? um / 1000 + ' mm' : um + ' µm'}`; },
       cursor: (x, y) => { $('cursor').textContent = `X ${x.toFixed(1)} µm   Y ${y.toFixed(1)} µm  (${frame()})`; },
       editChanged: (on) => { radio(['object', 'edit'], on ? 'edit' : 'object'); syncNodeButtons(); },
       toolChanged: (tool) => { radio(['select', 'pen'], tool); syncNodeButtons(); },
@@ -338,37 +339,18 @@
     }
 
     // ---- files -----------------------------------------------------------------------
-    async function openProject() {
-      if (app.running) return;
-      const r = await call('open_project');
-      if (r.cancelled) return;
-      if (r.error) { notice('Cannot open project: ' + r.error, true); return; }
-      await setView('design');
-      setParams(r.params);
-      canvas.setShapes(r.shapes, true);
-      canvas.fit();
-      notice(r.differs ? 'The project was drawn for a different stage range than the connected stage.' : '', true);
-    }
-    async function saveProject(saveAs) {
-      const r = await call('save_project', canvas.dicts(), params(), !!saveAs);
-      if (r.error) notice(r.error, true);
-      else if (r.name) notice('Saved ' + r.name + '.', false);
-    }
-    async function importDrawing() {
+    async function importFile() {
       if (app.running || app.mode !== 'design') { notice('Switch to Design (and stop any run) to import.', true); return; }
-      const r = await call('import_drawing');
+      if (document.querySelector('.modal-back')) return;
+      const r = await call('import_file');
       if (r.cancelled) return;
       if (r.error) { notice(r.error, true); return; }
+      if (r.bitmap) { await traceBitmap(r.bitmap); return; }
       canvas.setShapes(canvas.dicts().concat(r.shapes), true);
       canvas.fit();
       notice(r.message + ' Move or scale with G / S.', false);
     }
-    async function importBitmap() {
-      if (app.running || app.mode !== 'design') { notice('Switch to Design (and stop any run) to import.', true); return; }
-      if (document.querySelector('.modal-back')) return;
-      const r = await call('open_bitmap');
-      if (r.cancelled) return;
-      if (r.error) { notice(r.error, true); return; }
+    async function traceBitmap(r) {
       // Grey values for the live preview (the same pixels Python traces).
       const img = new Image();
       await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = r.png; });
@@ -441,23 +423,25 @@
       draw();
       q('bm-ok').focus();
     }
+    async function exportDrawing() {
+      const r = await call('export_drawing', canvas.dicts());
+      if (r.cancelled) return;
+      if (r.error) notice(r.error, true);
+      else if (r.name) notice('Exported ' + r.name + ' (' + r.message + '; origin at the start position).', false);
+    }
     async function exportPlan() {
       const r = await call('export_plan', canvas.dicts(), params());
       if (r.error) notice(r.error, true);
       else if (r.name) notice('Exported ' + r.name + ' (coordinates relative to the start position).', false);
     }
-    const FILE_ACTIONS = { open: openProject, import: importDrawing, bitmap: importBitmap, save: () => saveProject(false), saveas: () => saveProject(true), export: exportPlan };
+    const FILE_ACTIONS = { import: importFile, export: exportDrawing, path: exportPlan };
     new UI.Dropdown($('files-menu'), {
       menu: true, label: 'Files',
       options: [
-        { label: 'Open project…', value: 'open', kbd: combo('Mod+O') },
-        { label: 'Import drawing…', value: 'import', kbd: combo('Mod+Shift+I') },
-        { label: 'Import bitmap…', value: 'bitmap', kbd: combo('Mod+Shift+B') },
+        { label: 'Import…', value: 'import', kbd: combo('Mod+Shift+I') },
         { sep: true },
-        { label: 'Save', value: 'save', kbd: combo('Mod+S') },
-        { label: 'Save as…', value: 'saveas', kbd: combo('Mod+Shift+S') },
-        { sep: true },
-        { label: 'Export path…', value: 'export', kbd: combo('Mod+Shift+E') },
+        { label: 'Export drawing…', value: 'export', kbd: combo('Mod+Shift+E') },
+        { label: 'Export scan path…', value: 'path' },
       ],
       onChange: (v) => FILE_ACTIONS[v](),
     });
@@ -471,7 +455,7 @@
       ['Selection and edit', [['A / Alt+A', 'Select all / none'], ['Shift+H / Shift+V', 'Flip left-right / top-bottom (nodes in Edit)'], ['Mod+I', 'Invert the selection'], ['Shift+D', 'Duplicate'], ['Delete / X / Backspace', 'Delete'], ['Mod+Z / Mod+Shift+Z', 'Undo / redo'], ['Shift+Tab', 'Snap on / off']]],
       ['Transform', [['G / R / S', 'Grab / rotate / scale'], ['X / Y', 'Lock to an axis'], ['Click, Enter', 'Confirm'], ['Right-click, Esc', 'Cancel']]],
       ['Mouse and trackpad', [['Wheel', 'Zoom about the cursor'], ['Middle-drag', 'Pan'], ['Pinch', 'Zoom'], ['Press and drag', 'Box select']]],
-      ['Files', [['Mod+O / Mod+S', 'Open / save'], ['Mod+Shift+S', 'Save as'], ['Mod+Shift+I', 'Import drawing: SVG, DXF, GDSII or CSV'], ['Mod+Shift+B', 'Import bitmap: PNG, JPEG, TIFF or WebP'], ['Mod+Shift+E', 'Export path: CSV, G-code or NPZ'], ['Mod+/', 'This guide']]],
+      ['Files', [['Mod+Shift+I', 'Import: SVG, DXF, GDSII, or an image (PNG, JPEG, TIFF, WebP)'], ['Mod+Shift+E', 'Export the drawing: SVG or DXF'], ['Mod+/', 'This guide']]],
     ];
     function closeGuide() { const g = document.querySelector('.modal-back'); if (g) g.remove(); }
     function toggleGuide() {
@@ -497,11 +481,8 @@
       const mod = e.ctrlKey || e.metaKey, code = e.code;
       if (mod && !e.shiftKey && !e.altKey && (code === 'Slash' || e.key === '/')) { e.preventDefault(); toggleGuide(); return; }
       if (document.querySelector('.modal-back')) return;
-      if (mod && code === 'KeyO') { e.preventDefault(); openProject(); return; }
-      if (mod && code === 'KeyS') { e.preventDefault(); saveProject(e.shiftKey); return; }
-      if (mod && e.shiftKey && code === 'KeyI') { e.preventDefault(); importDrawing(); return; }
-      if (mod && e.shiftKey && code === 'KeyB') { e.preventDefault(); importBitmap(); return; }
-      if (mod && e.shiftKey && code === 'KeyE') { e.preventDefault(); exportPlan(); return; }
+      if (mod && e.shiftKey && code === 'KeyI') { e.preventDefault(); importFile(); return; }
+      if (mod && e.shiftKey && code === 'KeyE') { e.preventDefault(); exportDrawing(); return; }
       if (mod && code === 'Digit1') { e.preventDefault(); setView('design'); return; }
       if (mod && code === 'Digit2') { e.preventDefault(); setView('preview'); return; }
       if (mod && code === 'KeyZ') { e.preventDefault(); e.shiftKey ? canvas.redo() : canvas.undo(); return; }

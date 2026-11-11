@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from laserscan import __version__, fileio, project, settings, shapeops
+from laserscan import __version__, fileio, settings, shapeops
 from laserscan.devices import HARDWARE_AVAILABLE, serial_ports
 from laserscan.executor import State
 from laserscan.planning import (
@@ -36,17 +36,16 @@ from laserscan.session import SESSION
 DEFAULT_PORTS = ("COM3", "COM6")
 """Default (stage, shutter) serial ports of the lab machine."""
 # pywebview filters are 'Description (*.ext;*.ext)': the description may hold only letters, digits, "_" and spaces.
-PROJECT_TYPES = ("LaserScan project (*.json)",)
 IMPORT_TYPES = (
-    "Drawings (*.svg;*.dxf;*.gds;*.gds2;*.gdsii;*.csv)",
+    "Drawings and images (*.svg;*.dxf;*.gds;*.gds2;*.gdsii;*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.webp)",
     "SVG (*.svg)",
     "DXF (*.dxf)",
     "GDSII (*.gds;*.gds2;*.gdsii)",
+    "Images (*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.webp)",
     "CSV points (*.csv)",
 )
-BITMAP_TYPES = ("Images (*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.webp)",)
-EXPORT_SUFFIXES = (".csv", ".gcode", ".npz")
-EXPORT_TYPES = ("CSV (*.csv)", "G code (*.gcode)", "NumPy archive (*.npz)")
+DRAWING_TYPES = ("SVG (*.svg)", "DXF (*.dxf)")
+PATH_TYPES = ("CSV (*.csv)", "G code (*.gcode)", "NumPy archive (*.npz)")
 
 
 def _duration(seconds: float) -> str:
@@ -73,7 +72,7 @@ class Api:
         self._simulate = simulate or not HARDWARE_AVAILABLE
         self._profile = settings.load()
         self._window: Any = None
-        self._path: Path | None = None
+        self._dir = Path.home()  # folder the file dialogs start in: where the last file was
         self._bitmap = None  # grey array of the bitmap being imported
         self._origin: tuple[float, float] = (0.0, 0.0)
         self._motion: tuple[float, float] | None = None
@@ -140,29 +139,24 @@ class Api:
             "origin": list(self._origin),
         }
 
-    def _dir(self) -> str:
-        """Folder the file dialogs start in: the current project's folder, else the user's home."""
-        return str(self._path.parent) if self._path else str(Path.home())
-
     def _pick_open(self, types: tuple[str, ...]) -> str | None:
         from webview import FileDialog
 
-        chosen = self._window.create_file_dialog(FileDialog.OPEN, directory=self._dir(), file_types=types)
-        return str(chosen[0]) if chosen else None
+        chosen = self._window.create_file_dialog(FileDialog.OPEN, directory=str(self._dir), file_types=types)
+        if not chosen:
+            return None
+        self._dir = Path(chosen[0]).parent
+        return str(chosen[0])
 
     def _pick_save(self, name: str, types: tuple[str, ...]) -> str | None:
         from webview import FileDialog
 
-        chosen = self._window.create_file_dialog(FileDialog.SAVE, directory=self._dir(), save_filename=name, file_types=types)
+        chosen = self._window.create_file_dialog(FileDialog.SAVE, directory=str(self._dir), save_filename=name, file_types=types)
         if not chosen:
             return None
-        return str(chosen if isinstance(chosen, str) else chosen[0])
-
-    def _titled(self, path: str | None) -> None:
-        """Remember the current project file and show its name in the window title."""
-        self._path = Path(path) if path else None
-        if self._window is not None:
-            self._window.set_title(f"{self._path.name} — LaserScan" if self._path else "LaserScan")
+        path = str(chosen if isinstance(chosen, str) else chosen[0])
+        self._dir = Path(path).parent
+        return path
 
     # -- start-up ------------------------------------------------------------------
 
@@ -252,58 +246,28 @@ class Api:
 
     # -- files ------------------------------------------------------------------------
 
-    def open_project(self) -> dict:
-        path = self._pick_open(PROJECT_TYPES)
-        if not path:
-            return {"cancelled": True}
-        try:
-            shapes, params, file_profile = project.load(path)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            return {"error": str(exc)}
-        self._titled(path)
-        differs = bool(file_profile) and (
-            file_profile.get("x_range_um") != self._profile["x_range_um"]
-            or file_profile.get("y_range_um") != self._profile["y_range_um"]
-        )
-        return {"shapes": shapes, "params": asdict(params), "differs": differs}
+    def import_file(self) -> dict:
+        """Ask for a drawing (SVG, DXF, GDSII, CSV) or an image.
 
-    def save_project(self, shapes: list[dict], params: dict, save_as: bool = False) -> dict:
-        """Save to the current file, or ask for one (always when ``save_as``). Returns ``error``, ``cancelled`` or ``name``."""
-        path = None if save_as or self._path is None else str(self._path)
-        if path is None:
-            path = self._pick_save(self._path.name if self._path else "scan.laserscan.json", PROJECT_TYPES)
-            if not path:
-                return {"cancelled": True}
-            path = with_suffix(path, (".json",), ".laserscan.json")
-        try:
-            project.save(path, shapes, self._params(params), self._profile)
-        except OSError as exc:
-            return {"error": f"Cannot save project: {exc}"}
-        self._titled(path)
-        return {"name": Path(path).name}
-
-    def import_drawing(self) -> dict:
-        """Ask for an SVG, DXF, GDSII or CSV file and return its shapes (the page adds them to the drawing)."""
+        A drawing returns its ``shapes`` and a ``message`` (the page adds them to the drawing). An image returns a
+        ``bitmap`` preview for the tracing dialog, which then calls :meth:`trace_bitmap`.
+        """
         path = self._pick_open(IMPORT_TYPES)
         if not path:
             return {"cancelled": True}
         try:
+            if path.lower().endswith(fileio.BITMAP_SUFFIXES):
+                return {"bitmap": self._open_bitmap(path)}
             result = fileio.import_shapes(path)
         except (OSError, ValueError) as exc:
             return {"error": str(exc)}
         return {"shapes": result.shapes, "message": result.message}
 
-    def open_bitmap(self) -> dict:
-        """Ask for an image, keep its grey values for tracing, and return a PNG preview with the Otsu threshold."""
+    def _open_bitmap(self, path: str) -> dict:
+        """Keep the grey values of an image for tracing and describe it with a PNG preview and the Otsu threshold."""
         from PIL import Image
 
-        path = self._pick_open(BITMAP_TYPES)
-        if not path:
-            return {"cancelled": True}
-        try:
-            gray = fileio.load_bitmap(path)
-        except (OSError, ValueError) as exc:
-            return {"error": str(exc)}
+        gray = fileio.load_bitmap(path)
         self._bitmap = gray
         buffer = io.BytesIO()
         Image.fromarray(gray).save(buffer, "PNG")
@@ -316,7 +280,7 @@ class Api:
         }
 
     def trace_bitmap(self, options: dict) -> dict:
-        """Trace the bitmap from ``open_bitmap`` with the dialog's settings and return the shapes."""
+        """Trace the bitmap from ``import_file`` with the dialog's settings and return the shapes."""
         if self._bitmap is None:
             return {"error": "No bitmap is open."}
         try:
@@ -335,6 +299,23 @@ class Api:
     def close_bitmap(self) -> None:
         self._bitmap = None
 
+    def export_drawing(self, shapes: list[dict]) -> dict:
+        """Ask for a file name and write the drawing as SVG or DXF (what will be scanned, relative to the start position)."""
+        cleaned = [clean_shape(d) for d in shapes]
+        try:
+            fileio.drawing_geometry(cleaned)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        path = self._pick_save("scan.svg", DRAWING_TYPES)
+        if not path:
+            return {"cancelled": True}
+        path = with_suffix(path, fileio.DRAWING_SUFFIXES, ".svg")
+        try:
+            summary = fileio.export_drawing(cleaned, path)
+        except (OSError, ValueError) as exc:
+            return {"error": f"Cannot export: {exc}"}
+        return {"name": Path(path).name, "message": summary}
+
     def export_plan(self, shapes: list[dict], params: dict) -> dict:
         """Ask for a file name and write the scan path (CSV, G-code or NPZ, relative to the start position)."""
         parsed = self._params(params)
@@ -344,11 +325,10 @@ class Api:
             return {"error": str(exc)}
         if not plan:
             return {"error": "Nothing to export: draw a shape first."}
-        stem = self._path.name.removesuffix(".json").removesuffix(".laserscan") if self._path else "scan"
-        path = self._pick_save(f"{stem}.csv", EXPORT_TYPES)
+        path = self._pick_save("scan.csv", PATH_TYPES)
         if not path:
             return {"cancelled": True}
-        path = with_suffix(path, EXPORT_SUFFIXES, ".csv")
+        path = with_suffix(path, fileio.PATH_SUFFIXES, ".csv")
         try:
             fileio.export_plan(plan, parsed, path)
         except (OSError, ValueError) as exc:

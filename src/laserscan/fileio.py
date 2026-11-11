@@ -1,4 +1,7 @@
-"""Import vector drawings (SVG, DXF, GDSII, CSV) as shapes and export scan plans (CSV, G-code, NPZ). All units are microns."""
+"""Import drawings (SVG, DXF, GDSII, bitmaps) as shapes, export the drawing (SVG, DXF) and the scan path (CSV, G-code, NPZ).
+
+All units are microns inside the program; the files use the units of their format.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +16,10 @@ from shapely.ops import linemerge
 from laserscan.planning import Params, Segment, flatten_nodes, format_path, parse_nodes
 
 IMPORT_SUFFIXES = (".svg", ".dxf", ".gds", ".gds2", ".gdsii", ".csv")
-EXPORT_SUFFIXES = (".csv", ".gcode", ".npz")
+DRAWING_SUFFIXES = (".svg", ".dxf")
+"""Formats the drawing can be exported as."""
+PATH_SUFFIXES = (".csv", ".gcode", ".npz")
+"""Formats the scan path can be exported as."""
 SVG_PX_UM = 25400 / 96
 """One CSS pixel (1/96 inch) in microns."""
 DXF_UNITS_UM = {1: 25400.0, 2: 304800.0, 3: 1609344000.0, 4: 1000.0, 5: 10000.0, 6: 1e6, 7: 1e9, 13: 1.0, 14: 1e5}
@@ -256,6 +262,90 @@ def import_shapes(path: str | Path) -> Imported:
 # -- export ------------------------------------------------------------------------
 
 
+def drawing_geometry(shapes: list[dict]) -> tuple[list, list]:
+    """Polygons (subtractions applied, curves flattened) and open lines of a drawing, in microns, y up."""
+    from laserscan.planning import _polygons, build_region
+
+    region, lines = build_region(shapes)
+    polygons = [] if region is None else _polygons(region)
+    if not polygons and not lines:
+        raise ValueError("Nothing to export: draw a shape first.")
+    return polygons, lines
+
+
+def _export_svg(polygons, lines, path: Path) -> None:
+    """SVG in millimetres with a micron-scaled view box; y is flipped because SVG points down."""
+    bounds = np.array([g.bounds for g in (*polygons, *lines)])
+    x0, y0, x1, y1 = bounds[:, 0].min(), bounds[:, 1].min(), bounds[:, 2].max(), bounds[:, 3].max()
+    pad = max(x1 - x0, y1 - y0) * 0.02 or 1.0
+    x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
+
+    def ring(coords) -> str:
+        pts = list(coords)
+        return "M" + "L".join(f"{x:.4f},{-y:.4f}" for x, y in pts[:-1]) + "Z"
+
+    def poly(g) -> str:
+        return "".join(ring(r.coords) for r in (g.exterior, *g.interiors))
+
+    out = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{(x1 - x0) / 1000:.6f}mm" height="{(y1 - y0) / 1000:.6f}mm" '
+        f'viewBox="{x0:.4f} {-y1:.4f} {x1 - x0:.4f} {y1 - y0:.4f}">',
+        "<!-- laserscan export: 1 view-box unit = 1 micron -->",
+    ]
+    out += [f'<path d="{poly(g)}" fill="#000" fill-rule="evenodd"/>' for g in polygons]
+    width = (x1 - x0) / 1000
+    out += [
+        f'<path d="M{"L".join(f"{x:.4f},{-y:.4f}" for x, y in g.coords)}" fill="none" stroke="#000" stroke-width="{width:.4f}"/>'
+        for g in lines
+    ]
+    out.append("</svg>")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def _export_dxf(polygons, lines, path: Path) -> None:
+    """DXF R2010 in millimetres (``$INSUNITS`` = 4); outlines and holes are closed polylines, open shapes open ones."""
+    import ezdxf
+
+    doc = ezdxf.new("R2010")
+    doc.header["$INSUNITS"] = 4
+    msp = doc.modelspace()
+    for g in polygons:
+        for r in (g.exterior, *g.interiors):
+            msp.add_lwpolyline([(x / 1000, y / 1000) for x, y in r.coords[:-1]], close=True)
+    for g in lines:
+        msp.add_lwpolyline([(x / 1000, y / 1000) for x, y in g.coords])
+    doc.saveas(str(path))
+
+
+def export_drawing(shapes: list[dict], path: str | Path) -> str:
+    """Write the drawing as a standard 2D graphics file; the format follows the suffix.
+
+    Subtracted shapes are applied and curves are flattened, so the file holds what will be scanned.
+
+    - ``.svg``: millimetres, y axis pointing down as SVG expects; 1 view-box unit is 1 µm.
+    - ``.dxf``: millimetres, y axis up.
+
+    Args:
+        shapes: Shape dictionaries in microns, relative to the start position.
+        path: Destination.
+
+    Returns:
+        A short description of what was written.
+
+    Raises:
+        ValueError: If the drawing is empty or the suffix is unsupported.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    writer = {".svg": _export_svg, ".dxf": _export_dxf}.get(suffix)
+    if writer is None:
+        raise ValueError(f"Unsupported export type {suffix!r}; use " + ", ".join(DRAWING_SUFFIXES) + ".")
+    polygons, lines = drawing_geometry(shapes)
+    writer(polygons, lines, path)
+    return f"{len(polygons)} outline(s), {len(lines)} open path(s)"
+
+
 def export_plan(plan: list[Segment], params: Params, path: str | Path) -> None:
     """Write a scan plan; the format follows the suffix. Coordinates are relative to the start position.
 
@@ -309,7 +399,7 @@ def export_plan(plan: list[Segment], params: Params, path: str | Path) -> None:
             speed_um_s=params.speed,
         )
     else:
-        raise ValueError(f"Unsupported export type {suffix!r}; use " + ", ".join(EXPORT_SUFFIXES) + ".")
+        raise ValueError(f"Unsupported export type {suffix!r}; use " + ", ".join(PATH_SUFFIXES) + ".")
 
 
 # -- bitmaps -----------------------------------------------------------------------

@@ -38,7 +38,7 @@ def api():
 def test_public_methods_only_expose_the_page_contract(api):
     """pywebview exposes every public attribute, so state must stay private."""
     public = {n for n in dir(api) if not n.startswith("_")}
-    assert {"init", "replan", "state", "start", "open_project", "save_project", "export_plan"} <= public
+    assert {"init", "replan", "state", "start", "import_file", "export_drawing", "export_plan"} <= public
     assert all(callable(getattr(api, n)) for n in public)
 
 
@@ -68,31 +68,40 @@ def test_start_needs_a_connection(api):
     assert "error" in api.start([SQUARE], api.init()["params"], "design")
 
 
-def test_save_and_open_project_round_trip(api, tmp_path):
-    target = tmp_path / "job"
-    window = FakeWindow(str(target))
-    api.attach(window)
-    saved = api.save_project([SQUARE], api.init()["params"], True)
-    assert saved == {"name": "job.laserscan.json"}
-    assert window.titles[-1] == "job.laserscan.json — LaserScan"
-
-    window.answers.append([str(tmp_path / "job.laserscan.json")])
-    opened = api.open_project()
-    assert opened["shapes"][0]["path"] == SQUARE["path"]
-    assert opened["params"]["pattern"] == "serpentine"
-
-    again = api.save_project([SQUARE], api.init()["params"], False)  # saves to the same file without asking
-    assert again == {"name": "job.laserscan.json"} and not window.answers
-
-
 def test_cancelled_dialogs(api):
     api.attach(FakeWindow(None, None, None))
-    assert api.open_project() == {"cancelled": True}
-    assert api.save_project([SQUARE], api.init()["params"], True) == {"cancelled": True}
+    assert api.import_file() == {"cancelled": True}
+    assert api.export_drawing([SQUARE]) == {"cancelled": True}
     assert api.export_plan([SQUARE], api.init()["params"]) == {"cancelled": True}
 
 
-def test_export_adds_a_default_suffix(api, tmp_path):
+def test_export_drawing_adds_a_default_suffix_and_imports_back(api, tmp_path):
+    window = FakeWindow(str(tmp_path / "drawing"))
+    api.attach(window)
+    assert api.export_drawing([SQUARE])["name"] == "drawing.svg"
+    window.answers.append([str(tmp_path / "drawing.svg")])
+    result = api.import_file()
+    assert len(result["shapes"]) == 1 and "message" in result
+
+
+def test_import_file_hands_images_to_the_tracer(api, tmp_path):
+    from PIL import Image
+
+    Image.new("L", (40, 30), 255).save(tmp_path / "a.png")
+    api.attach(FakeWindow([str(tmp_path / "a.png")]))
+    result = api.import_file()
+    assert result["bitmap"]["w"] == 40 and result["bitmap"]["png"].startswith("data:image/png")
+
+
+def test_dialogs_start_where_the_last_file_was(api, tmp_path):
+    window = FakeWindow(str(tmp_path / "x.svg"), None)
+    api.attach(window)
+    api.export_drawing([SQUARE])
+    api.import_file()
+    assert window.dialogs[1][1]["directory"] == str(tmp_path)
+
+
+def test_export_plan_adds_a_default_suffix(api, tmp_path):
     api.attach(FakeWindow(str(tmp_path / "path")))
     assert api.export_plan([SQUARE], api.init()["params"]) == {"name": "path.csv"}
     assert (tmp_path / "path.csv").read_text().strip()
@@ -100,6 +109,7 @@ def test_export_adds_a_default_suffix(api, tmp_path):
 
 def test_export_of_an_empty_drawing_is_an_error(api):
     assert "error" in api.export_plan([], api.init()["params"])
+    assert "error" in api.export_drawing([])
 
 
 def test_merge_through_the_api(api):
@@ -117,6 +127,6 @@ def test_with_suffix():
 def test_file_filters_are_valid_for_pywebview():
     from webview.util import parse_file_type
 
-    for group in (api_module.PROJECT_TYPES, api_module.IMPORT_TYPES, api_module.BITMAP_TYPES, api_module.EXPORT_TYPES):
+    for group in (api_module.IMPORT_TYPES, api_module.DRAWING_TYPES, api_module.PATH_TYPES):
         for filter_ in group:
             parse_file_type(filter_)

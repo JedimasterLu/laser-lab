@@ -1,9 +1,9 @@
 /*
- * Shape model on top of Paper.js (https://paperjs.org): conversion between the project-file path strings and
+ * Shape model on top of Paper.js (https://paperjs.org): conversion between the path strings (`M L C Z`) and
  * Paper items, and the node operations of the editor. Paper does the Bézier maths (splitting, nearest point,
  * flattening, transforms, hit tests); this file only adds what it does not have: node types and the file format.
  *
- * World coordinates are microns (X, Y) as in the project files and in planning.py. The view shows screen up as +X
+ * World coordinates are microns (X, Y) as in planning.py. The view shows screen up as +X
  * and screen right as +Y (it matches the microscope camera), so every item lives in Paper's own frame
  * p = (Y, -X): a plain rotation, which keeps Paper's zoom and pan, hit tolerances and stroke widths as they are.
  *
@@ -53,7 +53,7 @@
     });
   }
 
-  // ---- project-file format ----------------------------------------------------------------------
+  // ---- path-string format ----------------------------------------------------------------------
 
   /** Four decimals; a tiny negative number (a rotation's rounding noise) prints as 0, not -0.0000. */
   const num = (v) => { const t = v.toFixed(4); return t === '-0.0000' ? '0.0000' : t; };

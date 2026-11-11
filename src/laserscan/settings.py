@@ -1,4 +1,4 @@
-"""Default stage profile. Nothing is persisted; the profile travels inside project files."""
+"""Default stage profile. Nothing is persisted."""
 
 from __future__ import annotations
 

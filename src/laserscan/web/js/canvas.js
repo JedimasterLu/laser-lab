@@ -707,7 +707,8 @@
         const delta = e.deltaY || e.deltaX;
         if (!delta) return;
         const rate = e.ctrlKey ? 0.01 : e.deltaMode === 0 ? 0.0015 : 0.05; // ctrl + wheel is a Chromium / WebView2 pinch
-        this.zoomAt(local(e), Math.exp(-delta * rate));
+        // Plain wheel: scroll down zooms in, up zooms out. A ctrl + wheel pinch keeps its natural direction.
+        this.zoomAt(local(e), Math.exp((e.ctrlKey ? -delta : delta) * rate));
       }, { passive: false });
 
       // WebKit (macOS) reports a trackpad pinch as gesture events whose scale is relative to the gesture's start.
@@ -786,6 +787,7 @@
         y0 = Math.max(y0, this.stage.y[0]); y1 = Math.min(y1, this.stage.y[1]);
       }
       const step = this.gridStep();
+      if (this.hooks.scale) this.hooks.scale(step);
       for (const major of [false, true]) {
         g.strokeStyle = major ? '#dde0e5' : '#eef0f3';
         g.lineWidth = 1;

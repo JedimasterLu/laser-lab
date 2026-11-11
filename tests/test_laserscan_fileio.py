@@ -1,11 +1,9 @@
-"""Tests for project files, drawing import and plan export."""
-
-import json
+"""Tests for drawing import and export and scan path export."""
 
 import numpy as np
 import pytest
 
-from laserscan import fileio, project
+from laserscan import fileio
 from laserscan.planning import Params, build_plan, parse_shape
 
 SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm" viewBox="0 0 10 10">
@@ -113,24 +111,41 @@ def test_export_formats(tmp_path):
         fileio.export_plan(plan, params, tmp_path / "b.pdf")
 
 
-def test_project_round_trip_and_errors():
-    shapes = [{"type": "path", "path": "M0,0L1,0L1,1Z", "op": "subtract", "junk": 1}]
-    params = Params(step=2.0, angle=30.0)
-    text = project.dumps(shapes, params, {"model": "x"})
-    back, p, profile = project.loads(text)
-    assert back == [{"type": "path", "path": "M0,0L1,0L1,1Z", "op": "subtract"}] and p == params and profile == {"model": "x"}
-    data = json.loads(text)
-    with pytest.raises(ValueError, match="newer"):
-        project.loads(json.dumps({**data, "version": 99}))
-    with pytest.raises(ValueError, match="absolute"):
-        project.loads(json.dumps({**data, "coordinates": "stage-absolute"}))
-    with pytest.raises(ValueError, match="not a LaserScan"):
-        project.loads("[1, 2]")
-    with pytest.raises(ValueError, match="not a LaserScan"):
-        project.loads("not json")
-    extra = json.loads(text)
-    extra["params"]["future_field"] = 1
-    assert project.loads(json.dumps(extra))[1] == params  # unknown parameters are ignored
+SHAPES = [
+    {"type": "path", "path": "M0,0L4000,0L4000,2000L0,2000Z", "op": "add"},
+    {"type": "path", "path": "M1000,500L2000,500L2000,1500L1000,1500Z", "op": "subtract"},
+    {"type": "path", "path": "M0,3000L1000,3500", "op": "add"},
+]
+
+
+@pytest.mark.parametrize("suffix", [".svg", ".dxf"])
+def test_drawing_export_round_trips_through_import(tmp_path, suffix):
+    f = tmp_path / f"a{suffix}"
+    fileio.export_drawing(SHAPES, f)
+    back = [parse_shape(s) for s in fileio.import_shapes(f).shapes]
+    assert sorted(g.geom_type for g in back) == ["LineString", "Polygon"]
+    poly = next(g for g in back if g.geom_type == "Polygon")
+    assert poly.area == pytest.approx(4000 * 2000 - 1000 * 1000, rel=1e-3)  # the subtraction is applied
+    assert len(poly.interiors) == 1
+    assert poly.bounds[2] - poly.bounds[0] == pytest.approx(4000, abs=1)  # units survive the trip
+
+
+def test_svg_export_flips_y_and_uses_millimetres(tmp_path):
+    import re
+
+    fileio.export_drawing(SHAPES[:1], tmp_path / "a.svg")  # 4 x 2 mm rectangle with its corner at the origin
+    text = (tmp_path / "a.svg").read_text()
+    assert re.search(r'width="4\.\d+mm" height="2\.\d+mm"', text) is not None  # plus a small margin
+    d = re.search(r'<path d="([^"]+)"', text).group(1)
+    ys = [float(y) for y in re.findall(r",(-?[\d.]+)", d)]
+    assert max(ys) == 0 and min(ys) == pytest.approx(-2000)  # SVG y points down, so the drawing is at y <= 0
+
+
+def test_drawing_export_errors(tmp_path):
+    with pytest.raises(ValueError, match="Nothing to export"):
+        fileio.export_drawing([], tmp_path / "a.svg")
+    with pytest.raises(ValueError, match="Unsupported"):
+        fileio.export_drawing(SHAPES, tmp_path / "a.pdf")
 
 
 def _bitmap(tmp_path, suffix=".png"):
